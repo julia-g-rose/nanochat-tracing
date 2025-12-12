@@ -167,20 +167,12 @@ def forward_model(model, input_ids):
 
 @weave.op()
 @torch.no_grad()
-def evaluate_example(idx, model, tokenizer, data, device, task_meta):
+def evaluate_example(item, model, tokenizer, device, task_meta, fewshot_examples=None):
     """Evaluate a single example, return dict with result and debug info"""
-    item = data[idx]
     task_type = task_meta['task_type']
     num_fewshot = task_meta['num_fewshot']
     continuation_delimiter = task_meta['continuation_delimiter']
-
-    # Sample few-shot examples (excluding current item)
-    fewshot_examples = []
-    if num_fewshot > 0:
-        rng = random.Random(1234 + idx)
-        available_indices = [i for i in range(len(data)) if i != idx]
-        fewshot_indices = rng.sample(available_indices, num_fewshot)
-        fewshot_examples = [data[i] for i in fewshot_indices]
+    fewshot_examples = fewshot_examples or []
 
     # Render prompts and batch sequences based on task type
     if task_type == 'multiple_choice':
@@ -269,10 +261,15 @@ def evaluate_example(idx, model, tokenizer, data, device, task_meta):
                 "correct_choice": correct_choice,
             }
         else:  # schema
+            # Split context_options into separate columns for easier viewing
+            context_option_one = item['context_options'][0] if len(item['context_options']) > 0 else ""
+            context_option_two = item['context_options'][1] if len(item['context_options']) > 1 else ""
             return {
                 "is_correct": is_correct,
                 "task_type": task_type,
                 "model_input": model_input,
+                "context_option_one": context_option_one,
+                "context_option_two": context_option_two,
                 "predicted_context_idx": pred_idx,
                 "correct_context_idx": item['gold'],
                 "continuation": item.get('continuation', ''),
@@ -289,10 +286,19 @@ def evaluate_task(model, tokenizer, data, device, task_meta):
     """
     rank = dist.get_rank() if dist.is_initialized() else 0
     world_size = dist.get_world_size() if dist.is_initialized() else 1
+    num_fewshot = task_meta['num_fewshot']
     correct = torch.zeros(len(data), dtype=torch.float32, device=device)
     # stride the examples to each rank
     for idx in range(rank, len(data), world_size):
-        result = evaluate_example(idx, model, tokenizer, data, device, task_meta)
+        item = data[idx]
+        # Sample few-shot examples (excluding current item)
+        fewshot_examples = []
+        if num_fewshot > 0:
+            rng = random.Random(1234 + idx)
+            available_indices = [i for i in range(len(data)) if i != idx]
+            fewshot_indices = rng.sample(available_indices, num_fewshot)
+            fewshot_examples = [data[i] for i in fewshot_indices]
+        result = evaluate_example(item, model, tokenizer, device, task_meta, fewshot_examples)
         is_correct = result["is_correct"]
         correct[idx] = float(is_correct)
     # sync results across all the processes if running distributed
