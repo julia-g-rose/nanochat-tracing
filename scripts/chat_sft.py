@@ -71,7 +71,8 @@ autocast_ctx = torch.amp.autocast(device_type=device_type, dtype=ptdtype) if dev
 
 # wandb logging init
 use_dummy_wandb = run == "dummy" or not master_process
-wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanochat-sft", name=run, config=user_config, save_code=True)
+wandb_project = os.environ.get("WANDB_PROJECT", "nanochat")
+wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project=wandb_project, name=run, config=user_config, save_code=True)
 
 # Weave tracing init (for evaluation tracking during training)
 if not use_dummy_wandb and master_process:
