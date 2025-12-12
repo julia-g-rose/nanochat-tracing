@@ -20,7 +20,7 @@ def log0(message):
     if int(os.environ.get('RANK', 0)) == 0:
         logger.info(message)
 
-def save_checkpoint(checkpoint_dir, step, model_data, optimizer_data, meta_data, rank=0):
+def save_checkpoint(checkpoint_dir, step, model_data, optimizer_data, meta_data, rank=0, wandb_run=None):
     if rank == 0:
         os.makedirs(checkpoint_dir, exist_ok=True)
         # Save the model state parameters
@@ -32,6 +32,31 @@ def save_checkpoint(checkpoint_dir, step, model_data, optimizer_data, meta_data,
         with open(meta_path, "w", encoding="utf-8") as f:
             json.dump(meta_data, f, indent=2)
         logger.info(f"Saved metadata to: {meta_path}")
+        
+        # Upload checkpoint to wandb as artifact if wandb_run is provided
+        if wandb_run is not None and hasattr(wandb_run, 'log_artifact'):
+            try:
+                import wandb
+                # Create artifact with metadata
+                artifact_name = f"checkpoint-step-{step}"
+                artifact = wandb.Artifact(
+                    name=artifact_name,
+                    type="model",
+                    metadata={
+                        "step": step,
+                        **meta_data
+                    }
+                )
+                
+                # Add checkpoint files
+                artifact.add_file(model_path, name=f"model_{step:06d}.pt")
+                artifact.add_file(meta_path, name=f"meta_{step:06d}.json")
+                # Log artifact with step as alias
+                wandb_run.log_artifact(artifact, aliases=[f"step_{step}", "latest"])
+                logger.info(f"✅ Uploaded checkpoint to wandb as artifact: {artifact_name}")
+                
+            except Exception as e:
+                logger.warning(f"Failed to upload checkpoint to wandb: {e}")
     # Note that optimizer state is sharded across ranks, so each rank must save its own.
     if optimizer_data is not None:
         os.makedirs(checkpoint_dir, exist_ok=True)

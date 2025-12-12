@@ -10,6 +10,7 @@ import random
 from jinja2 import Template
 import torch
 import torch.distributed as dist
+import weave
 
 # -----------------------------------------------------------------------------
 # Prompt rendering utilities
@@ -164,9 +165,21 @@ def forward_model(model, input_ids):
     return losses, predictions
 
 
+@weave.op()
 @torch.no_grad()
-def evaluate_example(idx, model, tokenizer, data, device, task_meta):
-    """Evaluate a single example, return True if correct, False otherwise"""
+def evaluate_example(step, model, tokenizer, data, device, task_meta, idx):
+    """
+    Evaluate a single example, return dict with result and debug info.
+    
+    Args:
+        step: Training step (used by Weave for tracking across checkpoints)
+        model: The model to evaluate
+        tokenizer: Tokenizer for encoding/decoding
+        data: List of evaluation examples
+        device: Device to run on
+        task_meta: Task metadata dict
+        idx: Index of the example to evaluate in the data list
+    """
     item = data[idx]
     task_type = task_meta['task_type']
     num_fewshot = task_meta['num_fewshot']
@@ -192,7 +205,7 @@ def evaluate_example(idx, model, tokenizer, data, device, task_meta):
         tokens, start_idxs, end_idxs = batch_sequences_lm(tokenizer, prompts)
     else:
         raise ValueError(f"Unsupported task type: {task_type}")
-
+    
     # Some models can't forward sequences beyond a certain length (e.g. GPT-2)
     # In these cases, we have to truncate sequences to max length and adjust the indices
     if hasattr(model, 'max_seq_len') and model.max_seq_len is not None:
@@ -212,6 +225,9 @@ def evaluate_example(idx, model, tokenizer, data, device, task_meta):
                 new_end_idxs.append(e)
         tokens, start_idxs, end_idxs = new_tokens, new_start_idxs, new_end_idxs
 
+    # Decode the first token sequence to trace actual model inputs into Weave
+    model_input = tokenizer.decode(tokens[0]) if tokens else ""
+
     # Stack up all the sequences into a batch
     pad_token_id = tokenizer.get_bos_token_id() # use BOS as pad token is ok
     input_ids = stack_sequences(tokens, pad_token_id)
@@ -229,18 +245,50 @@ def evaluate_example(idx, model, tokenizer, data, device, task_meta):
         predicted_tokens = predictions[0, si-1:ei-1]
         actual_tokens = input_ids[0, si:ei]
         is_correct = torch.all(predicted_tokens == actual_tokens).item()
+        
+        # Return human-readable text for debugging
+        predicted_text = tokenizer.decode(predicted_tokens.cpu().tolist())
+        actual_text = tokenizer.decode(actual_tokens.cpu().tolist())
+        return {
+            "is_correct": is_correct,
+            "task_type": task_type,
+            "model_input": model_input,
+            "predicted_continuation": predicted_text,
+            "actual_continuation": actual_text,
+        }
     elif task_type in ['multiple_choice', 'schema']:
         # For MC/schema: find the option with lowest average loss
         mean_losses = [losses[i, si-1:ei-1].mean().item()
                         for i, (si, ei) in enumerate(zip(start_idxs, end_idxs))]
         pred_idx = mean_losses.index(min(mean_losses))
         is_correct = pred_idx == item['gold']
+        
+        # Return human-readable text for debugging
+        if task_type == 'multiple_choice':
+            predicted_choice = item['choices'][pred_idx] if pred_idx < len(item['choices']) else "unknown"
+            correct_choice = item['choices'][item['gold']] if item['gold'] < len(item['choices']) else "unknown"
+            return {
+                "is_correct": is_correct,
+                "task_type": task_type,
+                "model_input": model_input,
+                "choices": item['choices'],
+                "predicted_choice": predicted_choice,
+                "correct_choice": correct_choice,
+            }
+        else:  # schema
+            return {
+                "is_correct": is_correct,
+                "task_type": task_type,
+                "model_input": model_input,
+                "predicted_context_idx": pred_idx,
+                "correct_context_idx": item['gold'],
+                "continuation": item.get('continuation', ''),
+            }
     else:
         raise ValueError(f"Unsupported task type: {task_type}")
 
-    return is_correct
 
-
+@weave.op()
 def evaluate_task(model, tokenizer, data, device, task_meta):
     """
     This function is responsible for evaluating one task across many examples.
@@ -248,10 +296,12 @@ def evaluate_task(model, tokenizer, data, device, task_meta):
     """
     rank = dist.get_rank() if dist.is_initialized() else 0
     world_size = dist.get_world_size() if dist.is_initialized() else 1
+    training_step = task_meta.get('training_step', 0)  # Default to 0 if not provided
     correct = torch.zeros(len(data), dtype=torch.float32, device=device)
     # stride the examples to each rank
     for idx in range(rank, len(data), world_size):
-        is_correct = evaluate_example(idx, model, tokenizer, data, device, task_meta)
+        result = evaluate_example(training_step, model, tokenizer, data, device, task_meta, idx)
+        is_correct = result["is_correct"]
         correct[idx] = float(is_correct)
     # sync results across all the processes if running distributed
     if world_size > 1:
@@ -259,4 +309,12 @@ def evaluate_task(model, tokenizer, data, device, task_meta):
         dist.all_reduce(correct, op=dist.ReduceOp.SUM)
     # compute the mean
     mean_correct = correct.mean().item()
-    return mean_correct
+    
+    # Return summary info for this task
+    return {
+        "accuracy": mean_correct,
+        "task_type": task_meta['task_type'],
+        "num_fewshot": task_meta['num_fewshot'],
+        "num_examples": len(data),
+        "num_correct": int(correct.sum().item()),
+    }
