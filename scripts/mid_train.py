@@ -81,8 +81,7 @@ if not use_dummy_wandb and master_process:
         
         if not wandb_entity:
             # Try getting from wandb API
-            import wandb as wandb_module
-            wandb_entity = wandb_module.Api().default_entity
+            wandb_entity = wandb.Api().default_entity
         
         if wandb_entity:
             weave.init(f"{wandb_entity}/{wandb_project}")
