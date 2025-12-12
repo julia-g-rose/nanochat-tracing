@@ -10,6 +10,7 @@ import random
 from jinja2 import Template
 import torch
 import torch.distributed as dist
+import weave
 
 # -----------------------------------------------------------------------------
 # Prompt rendering utilities
@@ -146,7 +147,6 @@ def forward_model(model, input_ids):
     """
     Take BxT tensor of token ids, return BxT tensor of losses and argmax predictions.
     The last column of losses is set to nan because we don't have autoregressive targets there.
-    Note: Not decorated with @weave.op() to avoid logging large tensors.
     """
     batch_size, seq_len = input_ids.size()
     outputs = model(input_ids)
@@ -167,9 +167,20 @@ def forward_model(model, input_ids):
 
 @weave.op()
 @torch.no_grad()
-def evaluate_example(idx, model, tokenizer, data, device, task_meta):
-    """Evaluate a single example, return dict with result and debug info"""
-    item = data[idx]
+def evaluate_example(step, model, tokenizer, data, device, task_meta, example_idx):
+    """
+    Evaluate a single example, return dict with result and debug info.
+    
+    Args:
+        step: Training step (used by Weave for tracking across checkpoints)
+        model: The model to evaluate
+        tokenizer: Tokenizer for encoding/decoding
+        data: List of evaluation examples
+        device: Device to run on
+        task_meta: Task metadata dict
+        example_idx: Index of the example to evaluate in the data list
+    """
+    item = data[example_idx]
     task_type = task_meta['task_type']
     num_fewshot = task_meta['num_fewshot']
     continuation_delimiter = task_meta['continuation_delimiter']
@@ -177,8 +188,8 @@ def evaluate_example(idx, model, tokenizer, data, device, task_meta):
     # Sample few-shot examples (excluding current item)
     fewshot_examples = []
     if num_fewshot > 0:
-        rng = random.Random(1234 + idx)
-        available_indices = [i for i in range(len(data)) if i != idx]
+        rng = random.Random(1234 + example_idx)
+        available_indices = [i for i in range(len(data)) if i != example_idx]
         fewshot_indices = rng.sample(available_indices, num_fewshot)
         fewshot_examples = [data[i] for i in fewshot_indices]
 
@@ -195,9 +206,6 @@ def evaluate_example(idx, model, tokenizer, data, device, task_meta):
     else:
         raise ValueError(f"Unsupported task type: {task_type}")
     
-    # Store the first prompt for debugging
-    example_prompt = prompts[0] if prompts else ""
-
     # Some models can't forward sequences beyond a certain length (e.g. GPT-2)
     # In these cases, we have to truncate sequences to max length and adjust the indices
     if hasattr(model, 'max_seq_len') and model.max_seq_len is not None:
@@ -216,6 +224,9 @@ def evaluate_example(idx, model, tokenizer, data, device, task_meta):
                 new_start_idxs.append(s)
                 new_end_idxs.append(e)
         tokens, start_idxs, end_idxs = new_tokens, new_start_idxs, new_end_idxs
+
+    # Decode the first token sequence to trace actual model inputs into Weave
+    model_input = tokenizer.decode(tokens[0]) if tokens else ""
 
     # Stack up all the sequences into a batch
     pad_token_id = tokenizer.get_bos_token_id() # use BOS as pad token is ok
@@ -241,7 +252,7 @@ def evaluate_example(idx, model, tokenizer, data, device, task_meta):
         return {
             "is_correct": is_correct,
             "task_type": task_type,
-            "example_prompt": example_prompt,
+            "model_input": model_input,
             "predicted_continuation": predicted_text,
             "actual_continuation": actual_text,
         }
@@ -259,7 +270,7 @@ def evaluate_example(idx, model, tokenizer, data, device, task_meta):
             return {
                 "is_correct": is_correct,
                 "task_type": task_type,
-                "example_prompt": example_prompt,
+                "model_input": model_input,
                 "choices": item['choices'],
                 "predicted_choice": predicted_choice,
                 "correct_choice": correct_choice,
@@ -268,7 +279,7 @@ def evaluate_example(idx, model, tokenizer, data, device, task_meta):
             return {
                 "is_correct": is_correct,
                 "task_type": task_type,
-                "example_prompt": example_prompt,
+                "model_input": model_input,
                 "predicted_context_idx": pred_idx,
                 "correct_context_idx": item['gold'],
                 "continuation": item.get('continuation', ''),
@@ -285,10 +296,11 @@ def evaluate_task(model, tokenizer, data, device, task_meta):
     """
     rank = dist.get_rank() if dist.is_initialized() else 0
     world_size = dist.get_world_size() if dist.is_initialized() else 1
+    training_step = task_meta.get('training_step', 0)  # Default to 0 if not provided
     correct = torch.zeros(len(data), dtype=torch.float32, device=device)
     # stride the examples to each rank
     for idx in range(rank, len(data), world_size):
-        result = evaluate_example(idx, model, tokenizer, data, device, task_meta)
+        result = evaluate_example(training_step, model, tokenizer, data, device, task_meta, idx)
         # Extract boolean from returned dict
         is_correct = result["is_correct"] if isinstance(result, dict) else result
         correct[idx] = float(is_correct)
