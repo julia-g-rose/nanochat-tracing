@@ -20,6 +20,7 @@ import os
 import itertools
 import re
 import wandb
+import weave
 import torch
 import torch.distributed as dist
 
@@ -62,6 +63,32 @@ autocast_ctx = torch.amp.autocast(device_type="cuda", dtype=dtype)
 # wandb logging init
 use_dummy_wandb = run == "dummy" or not master_process
 wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanochat-rl", name=run, config=user_config)
+
+# Weave tracing init (for evaluation tracking during training)
+if not use_dummy_wandb and master_process:
+    try:
+        # Get entity from wandb run
+        import time
+        # Sometimes entity is not immediately available, wait a bit
+        for _ in range(10):
+            wandb_entity = getattr(wandb_run, 'entity', None)
+            if wandb_entity:
+                break
+            time.sleep(0.1)
+        
+        if not wandb_entity:
+            # Try getting from wandb API
+            import wandb as wandb_module
+            wandb_entity = wandb_module.Api().default_entity
+        
+        if wandb_entity:
+            weave.init(f"{wandb_entity}/nanochat-rl")
+            print0(f"✅ Weave tracing initialized for evaluation tracking: {wandb_entity}/nanochat-rl")
+        else:
+            print0(f"⚠️ Could not initialize Weave tracing: wandb entity not available")
+            print0(f"   💡 Set WANDB_ENTITY environment variable to enable Weave tracing")
+    except Exception as e:
+        print0(f"⚠️ Could not initialize Weave tracing: {e}")
 
 # Init model and tokenizer
 model, tokenizer, meta = load_model(source, device, phase="eval")

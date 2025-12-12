@@ -99,7 +99,9 @@ def evaluate_model(model, tokenizer, device, max_per_task=-1):
             data = data[:max_per_task]
 
         # run the evaluation for this task
-        accuracy = evaluate_task(model, tokenizer, data, device, task_meta)
+        task_result = evaluate_task(model, tokenizer, data, device, task_meta)
+        # Extract accuracy from returned dict (for backward compatibility, handle both dict and float)
+        accuracy = task_result["accuracy"] if isinstance(task_result, dict) else task_result
 
         results[label] = accuracy
         random_baseline = random_baselines[label]
