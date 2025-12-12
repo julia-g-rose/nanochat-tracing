@@ -84,12 +84,12 @@ wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanochat", 
 # Weave tracing init (for evaluation tracking during training)
 if not use_dummy_wandb and master_process:
     try:
-        # Get entity from wandb run (need to access via run.entity after init)
-        import time
-        # Sometimes entity is not immediately available, wait a bit
+        # Get entity and project from wandb run (need to access via run attributes after init)
+        # Sometimes these are not immediately available, wait a bit
         for _ in range(10):
             wandb_entity = getattr(wandb_run, 'entity', None)
-            if wandb_entity:
+            wandb_project = getattr(wandb_run, 'project', None)
+            if wandb_entity and wandb_project:
                 break
             time.sleep(0.1)
         
@@ -98,11 +98,11 @@ if not use_dummy_wandb and master_process:
             import wandb as wandb_module
             wandb_entity = wandb_module.Api().default_entity
         
-        if wandb_entity:
-            weave.init(f"{wandb_entity}/nanochat")
-            print0(f"✅ Weave tracing initialized for evaluation tracking: {wandb_entity}/nanochat")
+        if wandb_entity and wandb_project:
+            weave.init(f"{wandb_entity}/{wandb_project}")
+            print0(f"✅ Weave tracing initialized for evaluation tracking: {wandb_entity}/{wandb_project}")
         else:
-            print0(f"⚠️ Could not initialize Weave tracing: wandb entity not available")
+            print0(f"⚠️ Could not initialize Weave tracing: wandb entity/project not available")
             print0(f"   💡 Set WANDB_ENTITY environment variable to enable Weave tracing")
     except Exception as e:
         print0(f"⚠️ Could not initialize Weave tracing: {e}")

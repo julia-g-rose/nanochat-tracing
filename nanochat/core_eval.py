@@ -167,7 +167,7 @@ def forward_model(model, input_ids):
 
 @weave.op()
 @torch.no_grad()
-def evaluate_example(step, model, tokenizer, data, device, task_meta, example_idx):
+def evaluate_example(step, model, tokenizer, data, device, task_meta, idx):
     """
     Evaluate a single example, return dict with result and debug info.
     
@@ -178,9 +178,9 @@ def evaluate_example(step, model, tokenizer, data, device, task_meta, example_id
         data: List of evaluation examples
         device: Device to run on
         task_meta: Task metadata dict
-        example_idx: Index of the example to evaluate in the data list
+        idx: Index of the example to evaluate in the data list
     """
-    item = data[example_idx]
+    item = data[idx]
     task_type = task_meta['task_type']
     num_fewshot = task_meta['num_fewshot']
     continuation_delimiter = task_meta['continuation_delimiter']
@@ -188,8 +188,8 @@ def evaluate_example(step, model, tokenizer, data, device, task_meta, example_id
     # Sample few-shot examples (excluding current item)
     fewshot_examples = []
     if num_fewshot > 0:
-        rng = random.Random(1234 + example_idx)
-        available_indices = [i for i in range(len(data)) if i != example_idx]
+        rng = random.Random(1234 + idx)
+        available_indices = [i for i in range(len(data)) if i != idx]
         fewshot_indices = rng.sample(available_indices, num_fewshot)
         fewshot_examples = [data[i] for i in fewshot_indices]
 
@@ -301,8 +301,7 @@ def evaluate_task(model, tokenizer, data, device, task_meta):
     # stride the examples to each rank
     for idx in range(rank, len(data), world_size):
         result = evaluate_example(training_step, model, tokenizer, data, device, task_meta, idx)
-        # Extract boolean from returned dict
-        is_correct = result["is_correct"] if isinstance(result, dict) else result
+        is_correct = result["is_correct"]
         correct[idx] = float(is_correct)
     # sync results across all the processes if running distributed
     if world_size > 1:
