@@ -85,8 +85,8 @@ if not use_dummy_wandb and master_process:
             wandb_entity = wandb_module.Api().default_entity
         
         if wandb_entity:
-            weave.init(f"{wandb_entity}/nanochat-mid")
-            print0(f"✅ Weave tracing initialized for evaluation tracking: {wandb_entity}/nanochat-mid")
+            weave.init(f"{wandb_entity}/{wandb_project}")
+            print0(f"✅ Weave tracing initialized for evaluation tracking: {wandb_entity}/{wandb_project}")
         else:
             print0(f"⚠️ Could not initialize Weave tracing: wandb entity not available")
             print0(f"   💡 Set WANDB_ENTITY environment variable to enable Weave tracing")

@@ -167,19 +167,8 @@ def forward_model(model, input_ids):
 
 @weave.op()
 @torch.no_grad()
-def evaluate_example(step, model, tokenizer, data, device, task_meta, idx):
-    """
-    Evaluate a single example, return dict with result and debug info.
-    
-    Args:
-        step: Training step (used by Weave for tracking across checkpoints)
-        model: The model to evaluate
-        tokenizer: Tokenizer for encoding/decoding
-        data: List of evaluation examples
-        device: Device to run on
-        task_meta: Task metadata dict
-        idx: Index of the example to evaluate in the data list
-    """
+def evaluate_example(idx, model, tokenizer, data, device, task_meta):
+    """Evaluate a single example, return dict with result and debug info"""
     item = data[idx]
     task_type = task_meta['task_type']
     num_fewshot = task_meta['num_fewshot']
@@ -296,11 +285,10 @@ def evaluate_task(model, tokenizer, data, device, task_meta):
     """
     rank = dist.get_rank() if dist.is_initialized() else 0
     world_size = dist.get_world_size() if dist.is_initialized() else 1
-    training_step = task_meta.get('training_step', 0)  # Default to 0 if not provided
     correct = torch.zeros(len(data), dtype=torch.float32, device=device)
     # stride the examples to each rank
     for idx in range(rank, len(data), world_size):
-        result = evaluate_example(training_step, model, tokenizer, data, device, task_meta, idx)
+        result = evaluate_example(idx, model, tokenizer, data, device, task_meta)
         is_correct = result["is_correct"]
         correct[idx] = float(is_correct)
     # sync results across all the processes if running distributed
