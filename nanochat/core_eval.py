@@ -215,7 +215,11 @@ def evaluate_example(idx, model, tokenizer, data, device, task_meta):
         tokens, start_idxs, end_idxs = new_tokens, new_start_idxs, new_end_idxs
 
     # Decode the first token sequence to trace actual model inputs into Weave
-    model_input = tokenizer.decode(tokens[0]) if tokens else ""
+    # For language_modeling, log what the model sees when making the prediction (up to answer start)
+    if task_type == 'language_modeling' and tokens:
+        model_input = tokenizer.decode(tokens[0][:start_idxs[0]])
+    else:
+        model_input = tokenizer.decode(tokens[0]) if tokens else ""
 
     # Stack up all the sequences into a batch
     pad_token_id = tokenizer.get_bos_token_id() # use BOS as pad token is ok
