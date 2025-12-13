@@ -261,18 +261,18 @@ def evaluate_example(item, model, tokenizer, device, task_meta, fewshot_examples
                 "correct_choice": correct_choice,
             }
         else:  # schema
-            # Split context_options into separate columns for easier viewing
-            context_option_one = item['context_options'][0] if len(item['context_options']) > 0 else ""
-            context_option_two = item['context_options'][1] if len(item['context_options']) > 1 else ""
+            # Show the full prompts that were actually compared for clarity
+            delimiter = task_meta['continuation_delimiter']
+            continuation = item.get('continuation', '')
+            context_option_one = item['context_options'][0] + delimiter + continuation if len(item['context_options']) > 0 else ""
+            context_option_two = item['context_options'][1] + delimiter + continuation if len(item['context_options']) > 1 else ""
             return {
                 "is_correct": is_correct,
                 "task_type": task_type,
-                "model_input": model_input,
                 "context_option_one": context_option_one,
                 "context_option_two": context_option_two,
                 "predicted_context_idx": pred_idx,
                 "correct_context_idx": item['gold'],
-                "continuation": item.get('continuation', ''),
             }
     else:
         raise ValueError(f"Unsupported task type: {task_type}")
