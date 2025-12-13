@@ -83,6 +83,7 @@ def evaluate_model(model, tokenizer, device, max_per_task=-1, model_metadata=Non
         start_time = time.time()
         label = task['label']
         task_meta = {
+            'task_name': label,
             'task_type': task['icl_task_type'],
             'dataset_uri': task['dataset_uri'],
             'num_fewshot': task['num_fewshot'][0],

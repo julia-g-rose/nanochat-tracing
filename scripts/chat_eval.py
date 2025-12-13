@@ -14,6 +14,7 @@ from contextlib import nullcontext
 
 import torch
 import torch.distributed as dist
+import weave
 
 from nanochat.common import compute_init, compute_cleanup, get_dist_info, print0, autodetect_device_type
 from nanochat.checkpoint_manager import load_model
@@ -28,7 +29,35 @@ from tasks.spellingbee import SpellingBee
 # -----------------------------------------------------------------------------
 # Generative evaluation loop (we go one problem at a time, sample, evaluate)
 
-def run_generative_eval(task_object, tokenizer, model, engine, num_samples, max_new_tokens, temperature, top_k, max_problems=None):
+@weave.op()
+def evaluate_generative_example(task_name, conversation, task_object, tokenizer, engine, num_samples, max_new_tokens, temperature, top_k):
+    """Evaluate a single generative example and return the result"""
+    # Tokenize the prompt
+    encoded_prompt = tokenizer.render_for_completion(conversation)
+    # Get the completions
+    results, _ = engine.generate_batch(
+        encoded_prompt,
+        num_samples=num_samples,
+        max_tokens=max_new_tokens,
+        temperature=temperature,
+        top_k=top_k,
+    )
+    # Decode the completions as text
+    prefix_length = len(encoded_prompt)
+    completions = [tokenizer.decode(result_tokens[prefix_length:]) for result_tokens in results]
+    # Evaluate success criteria
+    outcomes = [task_object.evaluate(conversation, completion) for completion in completions]
+    passed = any(outcomes)
+    
+    return {
+        "task_name": task_name,
+        "conversation": conversation,
+        "completions": completions,
+        "outcomes": outcomes,
+        "passed": passed,
+    }
+
+def run_generative_eval(task_name, task_object, tokenizer, model, engine, num_samples, max_new_tokens, temperature, top_k, max_problems=None):
 
     ddp, ddp_rank, ddp_local_rank, ddp_world_size = get_dist_info()
     device = model.get_device()
@@ -39,23 +68,13 @@ def run_generative_eval(task_object, tokenizer, model, engine, num_samples, max_
     num_passed, total = 0, 0
     for i in range(ddp_rank, num_problems, ddp_world_size):
         conversation = task_object[i]
-
-        # Tokenize the prompt
-        encoded_prompt = tokenizer.render_for_completion(conversation)
-        # Get the completions
-        results, _ = engine.generate_batch(
-            encoded_prompt,
-            num_samples=num_samples,
-            max_tokens=max_new_tokens,
-            temperature=temperature,
-            top_k=top_k,
+        
+        # Evaluate this example (traced by Weave)
+        result = evaluate_generative_example(
+            task_name, conversation, task_object, tokenizer, engine, 
+            num_samples, max_new_tokens, temperature, top_k
         )
-        # Decode the completions as text
-        prefix_length = len(encoded_prompt)
-        completions = [tokenizer.decode(result_tokens[prefix_length:]) for result_tokens in results]
-        # Evaluate success criteria
-        outcomes = [task_object.evaluate(conversation, completion) for completion in completions]
-        passed = any(outcomes)
+        passed = result["passed"]
 
         # Keep stats
         total += 1
@@ -87,7 +106,26 @@ def run_generative_eval(task_object, tokenizer, model, engine, num_samples, max_
 # A lot easier because we don't have to sample. Therefore, we can actually go
 # batches at a time and just check the logits for correct answer choices.
 
-def run_categorical_eval(task_object, tokenizer, model, batch_size, max_problems=None):
+@weave.op()
+def evaluate_categorical_example(task_name, conversation, predicted_letter, task_object):
+    """Evaluate a single categorical (multiple choice) example"""
+    # Get the correct answer
+    letters = conversation['letters']
+    correct_letter = letters[conversation.get('answer', conversation.get('gold', 0))]
+    
+    # Evaluate the outcome
+    is_correct = task_object.evaluate(conversation, predicted_letter)
+    
+    return {
+        "task_name": task_name,
+        "question": conversation.get('question', conversation.get('messages', [{}])[0].get('content', '')),
+        "choices": conversation.get('choices', []),
+        "predicted_letter": predicted_letter,
+        "correct_letter": correct_letter,
+        "is_correct": is_correct,
+    }
+
+def run_categorical_eval(task_name, task_object, tokenizer, model, batch_size, max_problems=None):
 
     ddp, ddp_rank, ddp_local_rank, ddp_world_size = get_dist_info()
     device = model.get_device()
@@ -136,8 +174,11 @@ def run_categorical_eval(task_object, tokenizer, model, batch_size, max_problems
             # get the argmax letter (the predicted answer)
             argmax_letter_id = focus_logits.argmax(dim=-1).item()
             predicted_letter = letters[argmax_letter_id]
-            # evaluate the outcome
-            outcome = task_object.evaluate(conversation, predicted_letter)
+            
+            # Evaluate this example (traced by Weave)
+            result = evaluate_categorical_example(task_name, conversation, predicted_letter, task_object)
+            outcome = result["is_correct"]
+            
             num_passed += int(outcome)
             total += 1
 
@@ -171,9 +212,9 @@ def run_chat_eval(task_name, model, tokenizer, engine,
     task_object = task_module()
     # Run the evaluation
     if task_object.eval_type == 'generative':
-        acc = run_generative_eval(task_object, tokenizer, model, engine, num_samples, max_new_tokens, temperature, top_k, max_problems=max_problems)
+        acc = run_generative_eval(task_name, task_object, tokenizer, model, engine, num_samples, max_new_tokens, temperature, top_k, max_problems=max_problems)
     elif task_object.eval_type == 'categorical':
-        acc = run_categorical_eval(task_object, tokenizer, model, batch_size, max_problems=max_problems)
+        acc = run_categorical_eval(task_name, task_object, tokenizer, model, batch_size, max_problems=max_problems)
     else:
         raise ValueError(f"Unsupported task evaluation type: {task_object.eval_type}")
     return acc

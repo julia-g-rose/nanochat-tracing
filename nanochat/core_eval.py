@@ -169,6 +169,7 @@ def forward_model(model, input_ids):
 @torch.no_grad()
 def evaluate_example(item, model, tokenizer, device, task_meta, fewshot_examples=None):
     """Evaluate a single example, return dict with result and debug info"""
+    task_name = task_meta.get('task_name', 'unknown')
     task_type = task_meta['task_type']
     num_fewshot = task_meta['num_fewshot']
     continuation_delimiter = task_meta['continuation_delimiter']
@@ -236,6 +237,7 @@ def evaluate_example(item, model, tokenizer, device, task_meta, fewshot_examples
         actual_text = tokenizer.decode(actual_tokens.cpu().tolist())
         return {
             "is_correct": is_correct,
+            "task_name": task_name,
             "task_type": task_type,
             "model_input": model_input,
             "predicted_continuation": predicted_text,
@@ -254,9 +256,9 @@ def evaluate_example(item, model, tokenizer, device, task_meta, fewshot_examples
             correct_choice = item['choices'][item['gold']] if item['gold'] < len(item['choices']) else "unknown"
             return {
                 "is_correct": is_correct,
+                "task_name": task_name,
                 "task_type": task_type,
                 "model_input": model_input,
-                "choices": item['choices'],
                 "predicted_choice": predicted_choice,
                 "correct_choice": correct_choice,
             }
@@ -268,6 +270,7 @@ def evaluate_example(item, model, tokenizer, device, task_meta, fewshot_examples
             context_option_two = item['context_options'][1] + delimiter + continuation if len(item['context_options']) > 1 else ""
             return {
                 "is_correct": is_correct,
+                "task_name": task_name,
                 "task_type": task_type,
                 "context_option_one": context_option_one,
                 "context_option_two": context_option_two,

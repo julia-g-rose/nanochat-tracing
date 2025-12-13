@@ -172,6 +172,31 @@ def get_batch():
 
 # -----------------------------------------------------------------------------
 # Simple evaluation loop for GSM8K pass@k
+
+@weave.op()
+def evaluate_gsm8k_example(conversation, task, tokenizer, engine, num_samples, max_completion_tokens, temperature, top_k):
+    """Evaluate a single GSM8K example with multiple samples"""
+    # Tokenize the prompt
+    encoded_prompt = tokenizer.render_for_completion(conversation)
+    # Generate completions
+    results, _ = engine.generate_batch(
+        encoded_prompt,
+        num_samples=num_samples,
+        max_tokens=max_completion_tokens,
+        temperature=temperature,
+        top_k=top_k,
+    )
+    # Decode and evaluate
+    prefix_length = len(encoded_prompt)
+    completions = [tokenizer.decode(result_tokens[prefix_length:]) for result_tokens in results]
+    outcomes = [{"completion": c, "is_correct": task.evaluate(conversation, c)} for c in completions]
+    
+    return {
+        "task_name": "GSM8K",
+        "question": conversation['messages'][0]['content'] if conversation.get('messages') else '',
+        "outcomes": outcomes,
+    }
+
 def run_gsm8k_eval(task, tokenizer, engine,
     max_examples=None,
     num_samples=1,
@@ -188,30 +213,17 @@ def run_gsm8k_eval(task, tokenizer, engine,
     max_examples = min(max_examples, len(task)) if max_examples is not None else len(task)
     for idx in range(ddp_rank, max_examples, ddp_world_size):
         conversation = task[idx]
-        tokens = tokenizer.render_for_completion(conversation)
-        prefix_length = len(tokens)
-        # Generate k samples using batched generation inside the Engine
-        assert num_samples <= device_batch_size # usually this is true. we can add a loop if not...
-        generated_token_sequences, masks = engine.generate_batch(
-            tokens,
-            num_samples=num_samples,
-            max_tokens=max_completion_tokens,
-            temperature=temperature,
-            top_k=top_k
+        
+        # Evaluate this example (traced by Weave)
+        result = evaluate_gsm8k_example(
+            conversation, task, tokenizer, engine,
+            num_samples, max_completion_tokens, temperature, top_k
         )
-        # Check each sample for correctness
-        outcomes = []
-        for sample_tokens in generated_token_sequences:
-            generated_tokens = sample_tokens[prefix_length:]
-            generated_text = tokenizer.decode(generated_tokens)
-            is_correct = task.evaluate(conversation, generated_text)
-            outcomes.append({
-                "is_correct": is_correct
-            })
-        # A bit bloated because I wanted to do more complex logging at one point.
+        
+        # Keep the same structure for compatibility
         record = {
             "idx": idx,
-            "outcomes": outcomes,
+            "outcomes": result["outcomes"],
         }
         yield record
 
