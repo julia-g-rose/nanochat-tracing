@@ -240,8 +240,28 @@ if __name__ == "__main__":
 
     device_type = autodetect_device_type() if args.device_type == "" else args.device_type
     ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
+    master_process = ddp_rank == 0
     ptdtype = torch.float32 if args.dtype == 'float32' else torch.bfloat16
     autocast_ctx = torch.amp.autocast(device_type=device_type, dtype=ptdtype) if device_type == "cuda" else nullcontext()
+    
+    # Initialize Weave for tracing (only on master process)
+    if master_process:
+        import os
+        import wandb
+        try:
+            wandb_entity = os.environ.get('WANDB_ENTITY')
+            wandb_project = os.environ.get('WANDB_PROJECT', 'nanochat')
+            
+            if not wandb_entity:
+                wandb_entity = wandb.Api().default_entity
+            
+            if wandb_entity:
+                weave.init(f"{wandb_entity}/{wandb_project}")
+                print0(f"✅ Weave tracing initialized for evaluation: {wandb_entity}/{wandb_project}")
+            else:
+                print0(f"⚠️ Could not initialize Weave tracing: WANDB_ENTITY not set")
+        except Exception as e:
+            print0(f"⚠️ Could not initialize Weave tracing: {e}")
 
     model, tokenizer, meta = load_model(args.source, device, phase="eval", model_tag=args.model_tag, step=args.step)
     engine = Engine(model, tokenizer)

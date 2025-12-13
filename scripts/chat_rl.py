@@ -176,8 +176,28 @@ def get_batch():
 @weave.op()
 def evaluate_gsm8k_example(conversation, task, tokenizer, engine, num_samples, max_completion_tokens, temperature, top_k):
     """Evaluate a single GSM8K example with multiple samples"""
-    # Tokenize the prompt
+    # Extract user question and ground truth answer
+    user_message = conversation['messages'][0]['content'] if conversation.get('messages') else ''
+    
+    # Ground truth answer is in the assistant message (includes tool use and final answer)
+    assistant_message = conversation['messages'][1] if len(conversation.get('messages', [])) > 1 else None
+    ground_truth_answer = None
+    if assistant_message:
+        # Extract the final answer after #### marker from ground truth
+        content = assistant_message.get('content', [])
+        if isinstance(content, list):
+            # Find the last text part which contains the final answer
+            for part in reversed(content):
+                if part.get('type') == 'text':
+                    text = part.get('text', '')
+                    if '####' in text:
+                        ground_truth_answer = text.split('####')[-1].strip()
+                        break
+    
+    # Tokenize the prompt (just the user question, priming for assistant completion)
     encoded_prompt = tokenizer.render_for_completion(conversation)
+    model_input = tokenizer.decode(encoded_prompt)
+    
     # Generate completions
     results, _ = engine.generate_batch(
         encoded_prompt,
@@ -186,6 +206,7 @@ def evaluate_gsm8k_example(conversation, task, tokenizer, engine, num_samples, m
         temperature=temperature,
         top_k=top_k,
     )
+    
     # Decode and evaluate
     prefix_length = len(encoded_prompt)
     completions = [tokenizer.decode(result_tokens[prefix_length:]) for result_tokens in results]
@@ -193,7 +214,10 @@ def evaluate_gsm8k_example(conversation, task, tokenizer, engine, num_samples, m
     
     return {
         "task_name": "GSM8K",
-        "question": conversation['messages'][0]['content'] if conversation.get('messages') else '',
+        "question": user_message,
+        "model_input": model_input,
+        "ground_truth_answer": ground_truth_answer,
+        "num_samples": num_samples,
         "outcomes": outcomes,
     }
 
