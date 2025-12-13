@@ -105,6 +105,10 @@ orig_model = model # original, uncompiled model
 # model = torch.compile(model, dynamic=True) # doesn't work super well because of variable lengths of inputs
 engine = Engine(model, tokenizer) # will be used for inline model evaluation only
 
+# Get step offset from previous phase for continuous step counting in wandb
+step_offset = meta.get("step", 0)
+print0(f"Continuing from {source} training step {step_offset}")
+
 # -----------------------------------------------------------------------------
 # Task data mixture we'll train on
 identity_conversations_filepath = os.path.join(get_base_dir(), "identity_conversations.jsonl")
@@ -213,9 +217,8 @@ for step in range(num_iterations):
         val_loss = val_loss.item()
         print0(f"Step {step:05d} | Validation loss: {val_loss:.6f}")
         wandb_run.log({
-            "step": step,
             "val_loss": val_loss,
-        })
+        }, step=step + step_offset)
         model.train()
 
     # evaluate accuracy of the multiple choice tasks (which are quick to run)
@@ -229,9 +232,8 @@ for step in range(num_iterations):
         metrics_str = ', '.join(f'{k}: {v:.6f}' for k, v in metrics.items())
         print0(f"Step {step:05d} | {metrics_str}")
         wandb_run.log({
-            "step": step,
             **metrics,
-        })
+        }, step=step + step_offset)
         model.train()
 
     if last_step:
@@ -266,11 +268,10 @@ for step in range(num_iterations):
     num_tokens_item = num_tokens.item()
     print0(f"Step {step:05d}/{num_iterations:05d} | Training loss: {train_loss_item:.6f}| lrm: {lrm:.6f}| num_tokens: {num_tokens_item:,}")
     wandb_run.log({
-        "step": step,
         "lrm": lrm,
         "train_loss": train_loss_item,
         "num_tokens": num_tokens_item,
-    })
+    }, step=step + step_offset)
     step += 1
 
 # Save the model at the end of the run
