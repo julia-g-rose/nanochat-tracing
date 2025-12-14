@@ -107,25 +107,6 @@ def evaluate_generative_example(task_name, conversation, task_object, tokenizer,
 # A lot easier because we don't have to sample. Therefore, we can actually go
 # batches at a time and just check the logits for correct answer choices.
 
-@weave.op()
-def evaluate_categorical_example(task_name, conversation, predicted_letter, task_object):
-    """Evaluate a single categorical (multiple choice) example"""
-    # Get the correct answer
-    letters = conversation['letters']
-    correct_letter = letters[conversation.get('answer', conversation.get('gold', 0))]
-    
-    # Evaluate the outcome
-    is_correct = task_object.evaluate(conversation, predicted_letter)
-    
-    return {
-        "task_name": task_name,
-        "question": conversation.get('question', conversation.get('messages', [{}])[0].get('content', '')),
-        "choices": conversation.get('choices', []),
-        "predicted_letter": predicted_letter,
-        "correct_letter": correct_letter,
-        "is_correct": is_correct,
-    }
-
 def run_categorical_eval(task_name, task_object, tokenizer, model, batch_size, max_problems=None):
 
     ddp, ddp_rank, ddp_local_rank, ddp_world_size = get_dist_info()
@@ -195,6 +176,26 @@ def run_categorical_eval(task_name, task_object, tokenizer, model, batch_size, m
     average = num_passed/total
     print0(f"Final: {num_passed}/{total} ({100*average:.2f}%)")
     return average
+
+
+@weave.op()
+def evaluate_categorical_example(task_name, conversation, predicted_letter, task_object):
+    """Evaluate a single categorical (multiple choice) example"""
+    # Get the correct answer
+    letters = conversation['letters']
+    correct_letter = letters[conversation.get('answer', conversation.get('gold', 0))]
+    
+    # Evaluate the outcome
+    is_correct = task_object.evaluate(conversation, predicted_letter)
+    
+    return {
+        "task_name": task_name,
+        "question": conversation.get('question', conversation.get('messages', [{}])[0].get('content', '')),
+        "choices": conversation.get('choices', []),
+        "predicted_letter": predicted_letter,
+        "correct_letter": correct_letter,
+        "is_correct": is_correct,
+    }
 
 # -----------------------------------------------------------------------------
 
