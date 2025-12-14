@@ -14,8 +14,8 @@ import os
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 import time
 import wandb
-import weave
 import torch
+import weave
 from contextlib import nullcontext
 from nanochat.common import compute_init, compute_cleanup, print0, DummyWandb, get_base_dir, autodetect_device_type
 from nanochat.tokenizer import get_token_bytes
@@ -23,6 +23,7 @@ from nanochat.checkpoint_manager import save_checkpoint
 from nanochat.loss_eval import evaluate_bpb
 from nanochat.checkpoint_manager import load_model
 import torch.distributed as dist
+from nanochat.common.weave_utils import init_weave
 
 from tasks.common import TaskMixture
 from tasks.gsm8k import GSM8K
@@ -69,28 +70,7 @@ wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project=wandb_projec
 
 # Weave tracing init (for evaluation tracking during training)
 if not use_dummy_wandb and master_process:
-    try:
-        # Get entity from wandb run
-        import time as time_module
-        # Sometimes entity is not immediately available, wait a bit
-        for _ in range(10):
-            wandb_entity = getattr(wandb_run, 'entity', None)
-            if wandb_entity:
-                break
-            time_module.sleep(0.1)
-        
-        if not wandb_entity:
-            # Try getting from wandb API
-            wandb_entity = wandb.Api().default_entity
-        
-        if wandb_entity:
-            weave.init(f"{wandb_entity}/{wandb_project}")
-            print0(f"✅ Weave tracing initialized for evaluation tracking: {wandb_entity}/{wandb_project}")
-        else:
-            print0(f"⚠️ Could not initialize Weave tracing: wandb entity not available")
-            print0(f"   💡 Set WANDB_ENTITY environment variable to enable Weave tracing")
-    except Exception as e:
-        print0(f"⚠️ Could not initialize Weave tracing: {e}")
+    init_weave(wandb_run, warn_fn=print0)
 
 # Load the model and tokenizer
 model, tokenizer, meta = load_model("base", device, phase="train", model_tag=model_tag, step=step)

@@ -17,8 +17,8 @@ import time
 from contextlib import nullcontext
 
 import wandb
-import weave
 import torch
+import weave
 
 from nanochat.gpt import GPT, GPTConfig
 from nanochat.dataloader import tokenizing_distributed_data_loader, tokenizing_distributed_data_loader_with_state
@@ -28,6 +28,7 @@ from nanochat.checkpoint_manager import save_checkpoint, load_checkpoint
 from nanochat.loss_eval import evaluate_bpb
 from nanochat.engine import Engine
 from scripts.base_eval import evaluate_model
+from nanochat.common.weave_utils import init_weave
 print_banner()
 
 # -----------------------------------------------------------------------------
@@ -85,21 +86,7 @@ wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project=wandb_projec
 
 # Weave tracing init (for evaluation tracking during training)
 if not use_dummy_wandb and master_process:
-    try:
-        # If WANDB_ENTITY isn't set, fall back to wandb's default entity.
-        if not wandb_entity:
-            try:
-                wandb_entity = wandb.Api().default_entity
-            except Exception:
-                wandb_entity = None
-        if wandb_entity and wandb_project:
-            weave.init(f"{wandb_entity}/{wandb_project}")
-            print0(f"✅ Weave tracing initialized for evaluation tracking: {wandb_entity}/{wandb_project}")
-        else:
-            print0(f"⚠️ Could not initialize Weave tracing: wandb entity/project not available")
-            print0(f"   💡 Set WANDB_ENTITY (and optionally WANDB_PROJECT) environment variables to enable Weave tracing")
-    except Exception as e:
-        print0(f"⚠️ Could not initialize Weave tracing: {e}")
+    init_weave(wandb_run, warn_fn=print0)
 
 # Tokenizer will be useful for evaluation, also we need the vocab size
 tokenizer = get_tokenizer()

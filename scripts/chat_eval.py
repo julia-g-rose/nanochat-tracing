@@ -15,6 +15,7 @@ from contextlib import nullcontext
 import torch
 import torch.distributed as dist
 import weave
+from nanochat.common.weave_utils import init_weave
 
 from nanochat.common import compute_init, compute_cleanup, get_dist_info, print0, autodetect_device_type
 from nanochat.checkpoint_manager import load_model
@@ -181,9 +182,14 @@ def run_categorical_eval(task_name, task_object, tokenizer, model, batch_size, m
 @weave.op()
 def evaluate_categorical_example(task_name, conversation, predicted_letter, task_object):
     """Evaluate a single categorical (multiple choice) example"""
-    # Get the correct answer
-    letters = conversation['letters']
-    correct_letter = letters[conversation.get('answer', conversation.get('gold', 0))]
+    # Get the correct answer; prefer explicit answer/gold index, else fall back to the
+    # ground-truth assistant message stored in the conversation.
+    letters = conversation.get('letters', ())
+    answer_idx = conversation.get('answer', conversation.get('gold'))
+    if answer_idx is not None and letters:
+        correct_letter = letters[answer_idx]
+    else:
+        correct_letter = conversation.get('messages', [{}])[-1].get('content', '')
     
     # Evaluate the outcome
     is_correct = task_object.evaluate(conversation, predicted_letter)
@@ -191,7 +197,6 @@ def evaluate_categorical_example(task_name, conversation, predicted_letter, task
     return {
         "task_name": task_name,
         "question": conversation.get('question', conversation.get('messages', [{}])[0].get('content', '')),
-        "choices": conversation.get('choices', []),
         "predicted_letter": predicted_letter,
         "correct_letter": correct_letter,
         "is_correct": is_correct,
@@ -248,20 +253,8 @@ if __name__ == "__main__":
     
     # Initialize Weave for tracing (only on master process)
     if master_process:
-        import os
-        import wandb
         try:
-            wandb_entity = os.environ.get('WANDB_ENTITY')
-            wandb_project = os.environ.get('WANDB_PROJECT', 'nanochat')
-            
-            if not wandb_entity:
-                wandb_entity = wandb.Api().default_entity
-            
-            if wandb_entity:
-                weave.init(f"{wandb_entity}/{wandb_project}")
-                print0(f"✅ Weave tracing initialized for evaluation: {wandb_entity}/{wandb_project}")
-            else:
-                print0(f"⚠️ Could not initialize Weave tracing: WANDB_ENTITY not set")
+            init_weave(None, warn_fn=print0)
         except Exception as e:
             print0(f"⚠️ Could not initialize Weave tracing: {e}")
 
@@ -318,4 +311,3 @@ if __name__ == "__main__":
     ])
 
     compute_cleanup()
-
