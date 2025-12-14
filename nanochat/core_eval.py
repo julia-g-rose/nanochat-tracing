@@ -270,7 +270,7 @@ def evaluate_example(idx, model, tokenizer, data, device, task_meta):
 
 def evaluate_task(model, tokenizer, data, device, task_meta):
     """
-    This function is responsible for evaluating one task across many example s.
+    This function is responsible for evaluating one task across many examples.
     It also handles dispatch to all processes if the script is run with torchrun.
     """
     rank = dist.get_rank() if dist.is_initialized() else 0
