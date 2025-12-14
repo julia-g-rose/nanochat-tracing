@@ -182,14 +182,10 @@ def run_categorical_eval(task_name, task_object, tokenizer, model, batch_size, m
 @weave.op()
 def evaluate_categorical_example(task_name, conversation, predicted_letter, task_object):
     """Evaluate a single categorical (multiple choice) example"""
-    # Get the correct answer; prefer explicit answer/gold index, else fall back to the
-    # ground-truth assistant message stored in the conversation.
-    letters = conversation.get('letters', ())
-    answer_idx = conversation.get('answer', conversation.get('gold'))
-    if answer_idx is not None and letters:
-        correct_letter = letters[answer_idx]
-    else:
-        correct_letter = conversation.get('messages', [{}])[-1].get('content', '')
+    # Get the correct answer from the conversation itself.
+    # This matches the scoring logic inside tasks like ARC/MMLU, which compare against the
+    # ground-truth assistant message stored in the final message.
+    correct_letter = conversation.get('messages', [{}])[-1].get('content', '')
     
     # Evaluate the outcome
     is_correct = task_object.evaluate(conversation, predicted_letter)
