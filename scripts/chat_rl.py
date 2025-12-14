@@ -155,49 +155,30 @@ def get_batch():
 
 @weave.op()
 def evaluate_gsm8k_example(conversation, task, tokenizer, engine, num_samples, max_completion_tokens, temperature, top_k):
-    """Evaluate a single GSM8K example with multiple samples"""
-    # Extract user question and ground truth answer
-    user_message = conversation['messages'][0]['content'] if conversation.get('messages') else ''
-    
-    # Ground truth answer is in the assistant message (includes tool use and final answer)
-    assistant_message = conversation['messages'][1] if len(conversation.get('messages', [])) > 1 else None
-    ground_truth_answer = None
-    if assistant_message:
-        # Extract the final answer after #### marker from ground truth
-        content = assistant_message.get('content', [])
-        if isinstance(content, list):
-            # Find the last text part which contains the final answer
-            for part in reversed(content):
-                if part.get('type') == 'text':
-                    text = part.get('text', '')
-                    if '####' in text:
-                        ground_truth_answer = text.split('####')[-1].strip()
-                        break
-    
-    # Tokenize the prompt (just the user question, priming for assistant completion)
-    encoded_prompt = tokenizer.render_for_completion(conversation)
-    model_input = tokenizer.decode(encoded_prompt)
-    
-    # Generate completions
-    results, _ = engine.generate_batch(
-        encoded_prompt,
+    """Evaluate a single GSM8K example with multiple samples (mirrors original logic)."""
+    tokens = tokenizer.render_for_completion(conversation)
+    prefix_length = len(tokens)
+
+    assert num_samples <= device_batch_size
+    generated_token_sequences, masks = engine.generate_batch(
+        tokens,
         num_samples=num_samples,
         max_tokens=max_completion_tokens,
         temperature=temperature,
         top_k=top_k,
     )
-    
-    # Decode and evaluate
-    prefix_length = len(encoded_prompt)
-    completions = [tokenizer.decode(result_tokens[prefix_length:]) for result_tokens in results]
-    outcomes = [{"completion": c, "is_correct": task.evaluate(conversation, c)} for c in completions]
-    
+
+    outcomes = []
+    for sample_tokens in generated_token_sequences:
+        generated_tokens = sample_tokens[prefix_length:]
+        generated_text = tokenizer.decode(generated_tokens)
+        is_correct = task.evaluate(conversation, generated_text)
+        outcomes.append({
+            "completion": generated_text,
+            "is_correct": is_correct,
+        })
+
     return {
-        "task_name": "GSM8K",
-        "question": user_message,
-        "model_input": model_input,
-        "ground_truth_answer": ground_truth_answer,
-        "num_samples": num_samples,
         "outcomes": outcomes,
     }
 
@@ -224,7 +205,6 @@ def run_gsm8k_eval(task, tokenizer, engine,
             num_samples, max_completion_tokens, temperature, top_k
         )
         
-        # Keep the same structure for compatibility
         record = {
             "idx": idx,
             "outcomes": result["outcomes"],
