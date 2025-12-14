@@ -235,6 +235,13 @@ def evaluate_multiple_choice_example(item, model, tokenizer, device, task_name, 
                 new_end_idxs.append(e)
         tokens, start_idxs, end_idxs = new_tokens, new_start_idxs, new_end_idxs
 
+    # Extract the question part (common prefix before choices) for logging
+    question_text = tokenizer.decode(tokens[0][:start_idxs[0]]) if tokens and start_idxs else item.get('question', '')
+    # Raw question from the dataset (if provided)
+    question_raw = item.get('question', '')
+    # Rendered prompt (text the model actually saw for choice 0)
+    prompt_rendered = prompts[0] if prompts else question_text
+
     # Stack and forward
     pad_token_id = tokenizer.get_bos_token_id()
     input_ids = stack_sequences(tokens, pad_token_id).to(device)
@@ -253,7 +260,9 @@ def evaluate_multiple_choice_example(item, model, tokenizer, device, task_name, 
         "is_correct": is_correct,
         "task_name": task_name,
         "task_type": "multiple_choice",
-        "question": item.get('question', ''),
+        "question": question_raw or question_text,
+        "question_rendered": question_text,
+        "prompt_rendered": prompt_rendered,
         "choices": item.get('choices', []),
         "predicted_choice": predicted_choice,
         "correct_choice": correct_choice,
@@ -296,17 +305,17 @@ def evaluate_schema_example(item, model, tokenizer, device, task_name, continuat
     pred_idx = mean_losses.index(min(mean_losses))
     is_correct = pred_idx == item['gold']
     
-    # Show full prompts for clarity
-    continuation = item.get('continuation', '')
-    context_option_one = item['context_options'][0] + continuation_delimiter + continuation if len(item['context_options']) > 0 else ""
-    context_option_two = item['context_options'][1] + continuation_delimiter + continuation if len(item['context_options']) > 1 else ""
+    # Extract actual context options and continuation from tokens
+    # In schema tasks: start_idx marks where context ends and continuation begins
+    context_options = [tokenizer.decode(tokens[i][:start_idxs[i]]) for i in range(len(tokens))]
+    continuation = tokenizer.decode(tokens[0][start_idxs[0]:end_idxs[0]]) if tokens else item.get('continuation', '')
     
     return {
         "is_correct": is_correct,
         "task_name": task_name,
         "task_type": "schema",
-        "context_option_one": context_option_one,
-        "context_option_two": context_option_two,
+        "context_options": context_options,
+        "continuation": continuation,
         "predicted_context_idx": pred_idx,
         "correct_context_idx": item['gold'],
         "num_fewshot": num_fewshot,
