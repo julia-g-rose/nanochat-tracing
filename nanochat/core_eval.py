@@ -70,6 +70,7 @@ def render_prompts_lm(item, continuation_delimiter, fewshot_examples=None):
     }
     prompt_without = template_without_continuation.render(**context)
     prompt_with = template_with_continuation.render(**context)
+    prompt_without = prompt_without.strip()
     return [prompt_without, prompt_with]
 
 
