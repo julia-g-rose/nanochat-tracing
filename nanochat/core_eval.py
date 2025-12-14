@@ -6,13 +6,17 @@ TODOs:
 - All tasks ~match except for squad. We get 31% reference is 37%. Figure out why.
 """
 import random
+
+from jinja2 import Template
 import torch
 import torch.distributed as dist
-from jinja2 import Template
 import weave
 
+# -----------------------------------------------------------------------------
+# Prompt rendering utilities
+
 def render_prompts_mc(item, continuation_delimiter, fewshot_examples=None):
-    """Render complete prompts for a multiple-choice question"""
+    """Render complete prompts for a multiple choice question"""
     template_str = """
 {%- for example in fewshot_examples -%}
 {{ example.query }}{{ continuation_delimiter }}{{ example.choices[example.gold] }}
@@ -98,6 +102,15 @@ def find_common_length(token_sequences, direction='left'):
     return min_len
 
 
+def stack_sequences(tokens, pad_token_id):
+    """Stack up a list of token sequences, pad to longest on the right"""
+    bsz, seq_len = len(tokens), max(len(x) for x in tokens)
+    input_ids = torch.full((bsz, seq_len), pad_token_id, dtype=torch.long)
+    for i, x in enumerate(tokens):
+        input_ids[i, :len(x)] = torch.tensor(x, dtype=torch.long)
+    return input_ids
+
+
 def batch_sequences_mc(tokenizer, prompts):
     # In multiple choice, contexts are the same but the continuation is different (common prefix)
     tokens = tokenizer(prompts, prepend=tokenizer.get_bos_token_id())
@@ -152,76 +165,67 @@ def forward_model(model, input_ids):
     return losses, predictions
 
 
-def stack_sequences(tokens, pad_token_id):
-    """Stack up a list of token sequences, pad to longest on the right"""
-    bsz, seq_len = len(tokens), max(len(x) for x in tokens)
-    input_ids = torch.full((bsz, seq_len), pad_token_id, dtype=torch.long)
-    for i, x in enumerate(tokens):
-        input_ids[i, :len(x)] = torch.tensor(x, dtype=torch.long)
-    return input_ids
-
-
 @weave.op()
 @torch.no_grad()
-def evaluate_language_modeling_example(item, model, tokenizer, device, task_name, continuation_delimiter, num_fewshot, fewshot_examples):
-    """Evaluate a single language modeling example"""
-    # Render prompts and batch sequences
+def evaluate_language_modeling_example(item, model, tokenizer, device, task_meta, fewshot_examples):
+    """Evaluate a single language modeling example (Weave-traced)"""
+    continuation_delimiter = task_meta['continuation_delimiter']
+
     prompts = render_prompts_lm(item, continuation_delimiter, fewshot_examples)
     tokens, start_idxs, end_idxs = batch_sequences_lm(tokenizer, prompts)
-    
-    # Truncate if needed
+
+    # Some models can't forward sequences beyond a certain length (e.g. GPT-2)
     if hasattr(model, 'max_seq_len') and model.max_seq_len is not None:
         max_tokens = model.max_seq_len
         new_tokens, new_start_idxs, new_end_idxs = [], [], []
         for t, s, e in zip(tokens, start_idxs, end_idxs):
             if len(t) > max_tokens:
                 num_to_crop = len(t) - max_tokens
-                new_tokens.append(t[-max_tokens:])
-                new_start_idxs.append(s - num_to_crop)
+                new_tokens.append(t[-max_tokens:])  # take the last max_tokens tokens
+                new_start_idxs.append(s - num_to_crop)  # shift the indices down
                 new_end_idxs.append(e - num_to_crop)
+                assert s - num_to_crop >= 0, "this should never happen right?"
+                assert e - num_to_crop >= 0, "this should never happen right?"
             else:
                 new_tokens.append(t)
                 new_start_idxs.append(s)
                 new_end_idxs.append(e)
         tokens, start_idxs, end_idxs = new_tokens, new_start_idxs, new_end_idxs
 
-    # Decode input for logging
-    model_input = tokenizer.decode(tokens[0][:start_idxs[0]]) if tokens else ""
-
-    # Stack and forward
     pad_token_id = tokenizer.get_bos_token_id()
     input_ids = stack_sequences(tokens, pad_token_id).to(device)
     losses, predictions = forward_model(model, input_ids)
 
-    # Evaluate
     si, ei = start_idxs[0], end_idxs[0]
     predicted_tokens = predictions[0, si-1:ei-1]
     actual_tokens = input_ids[0, si:ei]
     is_correct = torch.all(predicted_tokens == actual_tokens).item()
-    
+
+    # Human-readable inputs/outputs for trace inspection (does not affect scoring)
+    model_input = tokenizer.decode(tokens[0][:start_idxs[0]]) if tokens else ""
     predicted_text = tokenizer.decode(predicted_tokens.cpu().tolist())
     actual_text = tokenizer.decode(actual_tokens.cpu().tolist())
-    
+
     return {
-        "is_correct": is_correct,
-        "task_name": task_name,
+        "is_correct": bool(is_correct),
         "task_type": "language_modeling",
         "model_input": model_input,
         "predicted_continuation": predicted_text,
         "actual_continuation": actual_text,
-        "num_fewshot": num_fewshot,
+        "num_fewshot": task_meta["num_fewshot"],
     }
 
 
 @weave.op()
 @torch.no_grad()
-def evaluate_multiple_choice_example(item, model, tokenizer, device, task_name, continuation_delimiter, num_fewshot, fewshot_examples):
-    """Evaluate a single multiple-choice example"""
-    # Render prompts and batch sequences
+def evaluate_multiple_choice_example(item, model, tokenizer, device, task_meta, fewshot_examples):
+    """Evaluate a single multiple-choice example (Weave-traced)"""
+    continuation_delimiter = task_meta['continuation_delimiter']
+
     prompts = render_prompts_mc(item, continuation_delimiter, fewshot_examples)
     tokens, start_idxs, end_idxs = batch_sequences_mc(tokenizer, prompts)
-    
-    # Truncate if needed
+
+    # Some models can't forward sequences beyond a certain length (e.g. GPT-2)
     if hasattr(model, 'max_seq_len') and model.max_seq_len is not None:
         max_tokens = model.max_seq_len
         new_tokens, new_start_idxs, new_end_idxs = [], [], []
@@ -231,56 +235,52 @@ def evaluate_multiple_choice_example(item, model, tokenizer, device, task_name, 
                 new_tokens.append(t[-max_tokens:])
                 new_start_idxs.append(s - num_to_crop)
                 new_end_idxs.append(e - num_to_crop)
+                assert s - num_to_crop >= 0, "this should never happen right?"
+                assert e - num_to_crop >= 0, "this should never happen right?"
             else:
                 new_tokens.append(t)
                 new_start_idxs.append(s)
                 new_end_idxs.append(e)
         tokens, start_idxs, end_idxs = new_tokens, new_start_idxs, new_end_idxs
 
-    # Extract the question part (common prefix before choices) for logging
-    question_text = tokenizer.decode(tokens[0][:start_idxs[0]]) if tokens and start_idxs else item.get('question', '')
-    # Raw question from the dataset (if provided)
-    question_raw = item.get('question', '')
-    # Rendered prompt (text the model actually saw for choice 0)
-    prompt_rendered = prompts[0] if prompts else question_text
-
-    # Stack and forward
     pad_token_id = tokenizer.get_bos_token_id()
     input_ids = stack_sequences(tokens, pad_token_id).to(device)
     losses, predictions = forward_model(model, input_ids)
 
-    # Find option with lowest loss
     mean_losses = [losses[i, si-1:ei-1].mean().item()
-                    for i, (si, ei) in enumerate(zip(start_idxs, end_idxs))]
+                   for i, (si, ei) in enumerate(zip(start_idxs, end_idxs))]
     pred_idx = mean_losses.index(min(mean_losses))
     is_correct = pred_idx == item['gold']
-    
+
+    # Trace-friendly context (does not affect scoring)
+    prompt_0 = prompts[0] if prompts else ""
     predicted_choice = item['choices'][pred_idx] if pred_idx < len(item['choices']) else "unknown"
     correct_choice = item['choices'][item['gold']] if item['gold'] < len(item['choices']) else "unknown"
-    
+
     return {
-        "is_correct": is_correct,
-        "task_name": task_name,
+        "is_correct": bool(is_correct),
         "task_type": "multiple_choice",
-        "question": question_raw or question_text,
-        "question_rendered": question_text,
-        "prompt_rendered": prompt_rendered,
-        "choices": item.get('choices', []),
+        "prompt": prompt_0,
+        "query": item.get("query", ""),
+        "choices": item.get("choices", []),
+        "predicted_idx": pred_idx,
+        "gold_idx": item.get("gold"),
         "predicted_choice": predicted_choice,
         "correct_choice": correct_choice,
-        "num_fewshot": num_fewshot,
+        "num_fewshot": task_meta["num_fewshot"],
     }
 
 
 @weave.op()
 @torch.no_grad()
-def evaluate_schema_example(item, model, tokenizer, device, task_name, continuation_delimiter, num_fewshot, fewshot_examples):
-    """Evaluate a single schema example"""
-    # Render prompts and batch sequences
+def evaluate_schema_example(item, model, tokenizer, device, task_meta, fewshot_examples):
+    """Evaluate a single schema example (Weave-traced)"""
+    continuation_delimiter = task_meta['continuation_delimiter']
+
     prompts = render_prompts_schema(item, continuation_delimiter, fewshot_examples)
     tokens, start_idxs, end_idxs = batch_sequences_schema(tokenizer, prompts)
-    
-    # Truncate if needed
+
+    # Some models can't forward sequences beyond a certain length (e.g. GPT-2)
     if hasattr(model, 'max_seq_len') and model.max_seq_len is not None:
         max_tokens = model.max_seq_len
         new_tokens, new_start_idxs, new_end_idxs = [], [], []
@@ -290,67 +290,63 @@ def evaluate_schema_example(item, model, tokenizer, device, task_name, continuat
                 new_tokens.append(t[-max_tokens:])
                 new_start_idxs.append(s - num_to_crop)
                 new_end_idxs.append(e - num_to_crop)
+                assert s - num_to_crop >= 0, "this should never happen right?"
+                assert e - num_to_crop >= 0, "this should never happen right?"
             else:
                 new_tokens.append(t)
                 new_start_idxs.append(s)
                 new_end_idxs.append(e)
         tokens, start_idxs, end_idxs = new_tokens, new_start_idxs, new_end_idxs
 
-    # Stack and forward
     pad_token_id = tokenizer.get_bos_token_id()
     input_ids = stack_sequences(tokens, pad_token_id).to(device)
     losses, predictions = forward_model(model, input_ids)
 
-    # Find option with lowest loss
     mean_losses = [losses[i, si-1:ei-1].mean().item()
-                    for i, (si, ei) in enumerate(zip(start_idxs, end_idxs))]
+                   for i, (si, ei) in enumerate(zip(start_idxs, end_idxs))]
     pred_idx = mean_losses.index(min(mean_losses))
     is_correct = pred_idx == item['gold']
-    
-    # Extract actual context options and continuation from tokens
-    # In schema tasks: start_idx marks where context ends and continuation begins
-    context_options = [tokenizer.decode(tokens[i][:start_idxs[i]]) for i in range(len(tokens))]
-    continuation = tokenizer.decode(tokens[0][start_idxs[0]:end_idxs[0]]) if tokens else item.get('continuation', '')
-    
+
+    # Trace-friendly context (does not affect scoring)
+    prompt_0 = prompts[0] if prompts else ""
+
     return {
-        "is_correct": is_correct,
-        "task_name": task_name,
+        "is_correct": bool(is_correct),
         "task_type": "schema",
-        "context_options": context_options,
-        "continuation": continuation,
+        "prompt": prompt_0,
         "predicted_context_idx": pred_idx,
-        "correct_context_idx": item['gold'],
-        "num_fewshot": num_fewshot,
+        "gold_context_idx": item.get("gold"),
+        "num_fewshot": task_meta["num_fewshot"],
     }
 
 
 @torch.no_grad()
-def evaluate_example(item, model, tokenizer, device, task_meta, fewshot_examples=None):
-    """Evaluate a single example - dispatches to task-specific traced functions"""
-    task_name = task_meta.get('task_name', 'unknown')
+def evaluate_example(idx, model, tokenizer, data, device, task_meta):
+    """Evaluate a single example, return True if correct, False otherwise"""
+    item = data[idx]
     task_type = task_meta['task_type']
     num_fewshot = task_meta['num_fewshot']
     continuation_delimiter = task_meta['continuation_delimiter']
-    fewshot_examples = fewshot_examples or []
 
-    # Dispatch to task-specific function (each is separately traced by Weave)
-    if task_type == 'language_modeling':
-        return evaluate_language_modeling_example(
-            item, model, tokenizer, device, task_name, 
-            continuation_delimiter, num_fewshot, fewshot_examples
-        )
-    elif task_type == 'multiple_choice':
-        return evaluate_multiple_choice_example(
-            item, model, tokenizer, device, task_name,
-            continuation_delimiter, num_fewshot, fewshot_examples
-        )
+    # Sample few-shot examples (excluding current item)
+    fewshot_examples = []
+    if num_fewshot > 0:
+        rng = random.Random(1234 + idx)
+        available_indices = [i for i in range(len(data)) if i != idx]
+        fewshot_indices = rng.sample(available_indices, num_fewshot)
+        fewshot_examples = [data[i] for i in fewshot_indices]
+
+    # Dispatch into task-specific traced functions (keeps upstream scoring logic)
+    if task_type == 'multiple_choice':
+        out = evaluate_multiple_choice_example(item, model, tokenizer, device, task_meta, fewshot_examples)
     elif task_type == 'schema':
-        return evaluate_schema_example(
-            item, model, tokenizer, device, task_name,
-            continuation_delimiter, num_fewshot, fewshot_examples
-        )
+        out = evaluate_schema_example(item, model, tokenizer, device, task_meta, fewshot_examples)
+    elif task_type == 'language_modeling':
+        out = evaluate_language_modeling_example(item, model, tokenizer, device, task_meta, fewshot_examples)
     else:
         raise ValueError(f"Unsupported task type: {task_type}")
+
+    return out["is_correct"]
 
 
 def evaluate_task(model, tokenizer, data, device, task_meta):
@@ -360,25 +356,15 @@ def evaluate_task(model, tokenizer, data, device, task_meta):
     """
     rank = dist.get_rank() if dist.is_initialized() else 0
     world_size = dist.get_world_size() if dist.is_initialized() else 1
-    num_fewshot = task_meta['num_fewshot']
     correct = torch.zeros(len(data), dtype=torch.float32, device=device)
     # stride the examples to each rank
     for idx in range(rank, len(data), world_size):
-        item = data[idx]
-        # Sample few-shot examples (excluding current item)
-        fewshot_examples = []
-        if num_fewshot > 0:
-            rng = random.Random(1234 + idx)
-            available_indices = [i for i in range(len(data)) if i != idx]
-            fewshot_indices = rng.sample(available_indices, num_fewshot)
-            fewshot_examples = [data[i] for i in fewshot_indices]
-        # Evaluate the example
-        result = evaluate_example(item, model, tokenizer, device, task_meta, fewshot_examples)
-        correct[idx] = result["is_correct"]
-    # synchronize results across ranks
+        is_correct = evaluate_example(idx, model, tokenizer, data, device, task_meta)
+        correct[idx] = float(is_correct)
+    # sync results across all the processes if running distributed
     if world_size > 1:
         dist.barrier()
         dist.all_reduce(correct, op=dist.ReduceOp.SUM)
-    # calculate accuracy
+    # compute the mean
     mean_correct = correct.mean().item()
-    return {"accuracy": mean_correct}
+    return mean_correct
