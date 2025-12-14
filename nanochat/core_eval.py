@@ -247,9 +247,20 @@ def evaluate_example(idx, model, tokenizer, data, device, task_meta):
             "predicted_idx": pred_idx,
             "gold_idx": item.get("gold"),
             "prompt": prompts[0] if prompts else "",
-            "predicted_choice": item['choices'][pred_idx] if pred_idx < len(item['choices']) else "unknown",
-            "correct_choice": item['choices'][item['gold']] if item['gold'] < len(item['choices']) else "unknown",
         })
+        if task_type == 'multiple_choice':
+            choices = item.get("choices", [])
+            trace_payload.update({
+                "choices": choices,
+                "predicted_choice": choices[pred_idx] if pred_idx < len(choices) else "unknown",
+                "correct_choice": choices[item['gold']] if item.get("gold", -1) < len(choices) else "unknown",
+            })
+        else:  # schema
+            trace_payload.update({
+                "context_options": item.get("context_options", []),
+                "predicted_context_idx": pred_idx,
+                "gold_context_idx": item.get("gold"),
+            })
     else:
         raise ValueError(f"Unsupported task type: {task_type}")
 
