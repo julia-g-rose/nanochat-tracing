@@ -60,7 +60,7 @@ eval_tokens = 20*524288 # number of tokens to evaluate val loss on
 core_metric_every = 2000 # every how many steps to evaluate the core metric (-1 = disable)
 core_metric_max_per_task = 500 # examples per task in estimating the core metric
 sample_every = 2000 # every how many steps to sample from the model
-save_every = -1 # every how many steps to save model checkpoints (-1 = disable, and save only at the end of the run)
+save_every = core_metric_every # every how many steps to save model checkpoints (-1 = disable, and save only at the end of the run)
 # Output
 model_tag = "" # optionally override the model tag for the output checkpoint directory name
 # now allow CLI to override the settings via the configurator lol
@@ -80,30 +80,24 @@ get_max_memory = torch.cuda.max_memory_allocated if device_type == "cuda" else l
 # wandb logging init
 use_dummy_wandb = run == "dummy" or not master_process
 wandb_project = os.environ.get("WANDB_PROJECT", "nanochat")
+wandb_entity = os.environ.get("WANDB_ENTITY")
 wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project=wandb_project, name=run, config=user_config)
 
 # Weave tracing init (for evaluation tracking during training)
 if not use_dummy_wandb and master_process:
     try:
-        # Get entity and project from wandb run (need to access via run attributes after init)
-        # Sometimes these are not immediately available, wait a bit
-        for _ in range(10):
-            wandb_entity = getattr(wandb_run, 'entity', None)
-            wandb_project = getattr(wandb_run, 'project', None)
-            if wandb_entity and wandb_project:
-                break
-            time.sleep(0.1)
-        
+        # If WANDB_ENTITY isn't set, fall back to wandb's default entity.
         if not wandb_entity:
-            # Try getting from wandb API
-            wandb_entity = wandb.Api().default_entity
-        
+            try:
+                wandb_entity = wandb.Api().default_entity
+            except Exception:
+                wandb_entity = None
         if wandb_entity and wandb_project:
             weave.init(f"{wandb_entity}/{wandb_project}")
             print0(f"✅ Weave tracing initialized for evaluation tracking: {wandb_entity}/{wandb_project}")
         else:
             print0(f"⚠️ Could not initialize Weave tracing: wandb entity/project not available")
-            print0(f"   💡 Set WANDB_ENTITY environment variable to enable Weave tracing")
+            print0(f"   💡 Set WANDB_ENTITY (and optionally WANDB_PROJECT) environment variables to enable Weave tracing")
     except Exception as e:
         print0(f"⚠️ Could not initialize Weave tracing: {e}")
 
@@ -263,7 +257,6 @@ while True:
     # once in a while: estimate the CORE metric (all ranks participate)
     # use the original uncompiled model because the inputs keep changing shape
     results = {}
-    eval_checkpoint_saved = False
     if core_metric_every > 0 and (last_step or (step > 0 and step % core_metric_every == 0)):
         model.eval()
         with autocast_ctx:
@@ -285,36 +278,6 @@ while True:
             "core_metric": results["core_metric"],
             "centered_results": results["centered_results"],
         }, step=step)
-        
-        # Save checkpoint at each evaluation iteration (for artifact tracking)
-        if step >= 0 and step != resume_from_step:
-            save_checkpoint(
-                checkpoint_dir,
-                step,
-                orig_model.state_dict(),
-                [opt.state_dict() for opt in optimizers],
-                {
-                    "step": step,
-                    "val_bpb": val_bpb,
-                    "model_config": model_config_kwargs,
-                    "user_config": user_config,
-                    "device_batch_size": device_batch_size,
-                    "max_seq_len": max_seq_len,
-                    "dataloader_state_dict": dataloader_state_dict,
-                    "loop_state": {
-                        "min_val_bpb": min_val_bpb,
-                        "smooth_train_loss": smooth_train_loss,
-                        "total_training_time": total_training_time,
-                    },
-                    "core_metric": results.get("core_metric"),  # Include eval metrics
-                    "centered_results": results.get("centered_results"),
-                },
-                rank=ddp_rank,
-                wandb_run=wandb_run
-            )
-            eval_checkpoint_saved = True
-            print0(f"✅ Saved evaluation checkpoint and artifact at step {step}")
-        
         model.train()
 
     # once in a while: sample from the model (only on master process)
@@ -339,9 +302,8 @@ while True:
         model.train()
 
     # save checkpoint: at the end of the run, or every save_every steps, except at the first step or the resume step
-    # Skip if we already saved a checkpoint during evaluation this step
     should_save = last_step or (step > 0 and step != resume_from_step and save_every > 0 and step % save_every == 0)
-    if should_save and not eval_checkpoint_saved:
+    if should_save:
         save_checkpoint(
             checkpoint_dir,
             step,
@@ -360,8 +322,12 @@ while True:
                     "smooth_train_loss": smooth_train_loss,
                     "total_training_time": total_training_time,
                 },
+                # If we happened to run CORE eval this step, attach it to the checkpoint metadata.
+                "core_metric": results.get("core_metric"),
+                "centered_results": results.get("centered_results"),
             },
             rank=ddp_rank,
+            wandb_run=wandb_run,
         )
 
     # termination conditions (TODO: possibly also add loss explosions etc.)
