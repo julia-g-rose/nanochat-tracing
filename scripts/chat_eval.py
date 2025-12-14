@@ -29,34 +29,6 @@ from tasks.spellingbee import SpellingBee
 # -----------------------------------------------------------------------------
 # Generative evaluation loop (we go one problem at a time, sample, evaluate)
 
-@weave.op()
-def evaluate_generative_example(task_name, conversation, task_object, tokenizer, engine, num_samples, max_new_tokens, temperature, top_k):
-    """Evaluate a single generative example and return the result"""
-    # Tokenize the prompt
-    encoded_prompt = tokenizer.render_for_completion(conversation)
-    # Get the completions
-    results, _ = engine.generate_batch(
-        encoded_prompt,
-        num_samples=num_samples,
-        max_tokens=max_new_tokens,
-        temperature=temperature,
-        top_k=top_k,
-    )
-    # Decode the completions as text
-    prefix_length = len(encoded_prompt)
-    completions = [tokenizer.decode(result_tokens[prefix_length:]) for result_tokens in results]
-    # Evaluate success criteria
-    outcomes = [task_object.evaluate(conversation, completion) for completion in completions]
-    passed = any(outcomes)
-    
-    return {
-        "task_name": task_name,
-        "conversation": conversation,
-        "completions": completions,
-        "outcomes": outcomes,
-        "passed": passed,
-    }
-
 def run_generative_eval(task_name, task_object, tokenizer, model, engine, num_samples, max_new_tokens, temperature, top_k, max_problems=None):
 
     ddp, ddp_rank, ddp_local_rank, ddp_world_size = get_dist_info()
@@ -100,6 +72,35 @@ def run_generative_eval(task_name, task_object, tokenizer, model, engine, num_sa
 
     # Return the accuracy
     return num_passed/total
+
+
+@weave.op()
+def evaluate_generative_example(task_name, conversation, task_object, tokenizer, engine, num_samples, max_new_tokens, temperature, top_k):
+    """Evaluate a single generative example and return the result"""
+    # Tokenize the prompt
+    encoded_prompt = tokenizer.render_for_completion(conversation)
+    # Get the completions
+    results, _ = engine.generate_batch(
+        encoded_prompt,
+        num_samples=num_samples,
+        max_tokens=max_new_tokens,
+        temperature=temperature,
+        top_k=top_k,
+    )
+    # Decode the completions as text
+    prefix_length = len(encoded_prompt)
+    completions = [tokenizer.decode(result_tokens[prefix_length:]) for result_tokens in results]
+    # Evaluate success criteria
+    outcomes = [task_object.evaluate(conversation, completion) for completion in completions]
+    passed = any(outcomes)
+    
+    return {
+        "task_name": task_name,
+        "conversation": conversation,
+        "completions": completions,
+        "outcomes": outcomes,
+        "passed": passed,
+    }
 
 # -----------------------------------------------------------------------------
 # Categorical evaluation loop
@@ -316,3 +317,4 @@ if __name__ == "__main__":
     ])
 
     compute_cleanup()
+
