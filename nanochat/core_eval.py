@@ -167,6 +167,36 @@ def forward_model(model, input_ids):
 
 @weave.op()
 @torch.no_grad()
+def evaluate_example(idx, model, tokenizer, data, device, task_meta):
+    """Evaluate a single example, return True if correct, False otherwise"""
+    item = data[idx]
+    task_type = task_meta['task_type']
+    num_fewshot = task_meta['num_fewshot']
+    continuation_delimiter = task_meta['continuation_delimiter']
+
+    # Sample few-shot examples (excluding current item)
+    fewshot_examples = []
+    if num_fewshot > 0:
+        rng = random.Random(1234 + idx)
+        available_indices = [i for i in range(len(data)) if i != idx]
+        fewshot_indices = rng.sample(available_indices, num_fewshot)
+        fewshot_examples = [data[i] for i in fewshot_indices]
+
+    # Dispatch into task-specific traced functions (keeps upstream scoring logic)
+    if task_type == 'multiple_choice':
+        out = evaluate_multiple_choice_example(item, model, tokenizer, device, task_meta, fewshot_examples)
+    elif task_type == 'schema':
+        out = evaluate_schema_example(item, model, tokenizer, device, task_meta, fewshot_examples)
+    elif task_type == 'language_modeling':
+        out = evaluate_language_modeling_example(item, model, tokenizer, device, task_meta, fewshot_examples)
+    else:
+        raise ValueError(f"Unsupported task type: {task_type}")
+
+    return out["is_correct"]
+
+
+@weave.op()
+@torch.no_grad()
 def evaluate_language_modeling_example(item, model, tokenizer, device, task_meta, fewshot_examples):
     """Evaluate a single language modeling example (Weave-traced)"""
     continuation_delimiter = task_meta['continuation_delimiter']
@@ -318,35 +348,6 @@ def evaluate_schema_example(item, model, tokenizer, device, task_meta, fewshot_e
         "gold_context_idx": item.get("gold"),
         "num_fewshot": task_meta["num_fewshot"],
     }
-
-
-@torch.no_grad()
-def evaluate_example(idx, model, tokenizer, data, device, task_meta):
-    """Evaluate a single example, return True if correct, False otherwise"""
-    item = data[idx]
-    task_type = task_meta['task_type']
-    num_fewshot = task_meta['num_fewshot']
-    continuation_delimiter = task_meta['continuation_delimiter']
-
-    # Sample few-shot examples (excluding current item)
-    fewshot_examples = []
-    if num_fewshot > 0:
-        rng = random.Random(1234 + idx)
-        available_indices = [i for i in range(len(data)) if i != idx]
-        fewshot_indices = rng.sample(available_indices, num_fewshot)
-        fewshot_examples = [data[i] for i in fewshot_indices]
-
-    # Dispatch into task-specific traced functions (keeps upstream scoring logic)
-    if task_type == 'multiple_choice':
-        out = evaluate_multiple_choice_example(item, model, tokenizer, device, task_meta, fewshot_examples)
-    elif task_type == 'schema':
-        out = evaluate_schema_example(item, model, tokenizer, device, task_meta, fewshot_examples)
-    elif task_type == 'language_modeling':
-        out = evaluate_language_modeling_example(item, model, tokenizer, device, task_meta, fewshot_examples)
-    else:
-        raise ValueError(f"Unsupported task type: {task_type}")
-
-    return out["is_correct"]
 
 
 def evaluate_task(model, tokenizer, data, device, task_meta):
