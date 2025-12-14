@@ -302,8 +302,7 @@ while True:
         model.train()
 
     # save checkpoint: at the end of the run, or every save_every steps, except at the first step or the resume step
-    should_save = last_step or (step > 0 and step != resume_from_step and save_every > 0 and step % save_every == 0)
-    if should_save:
+    if last_step or (step > 0 and step != resume_from_step and save_every > 0 and step % save_every == 0):
         save_checkpoint(
             checkpoint_dir,
             step,

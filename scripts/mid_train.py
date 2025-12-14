@@ -239,13 +239,14 @@ while True:
     if master_process and last_step and not dry_run:
         output_dirname = f"d{depth}" # e.g. d12
         checkpoint_dir = os.path.join(base_dir, "mid_checkpoints", output_dirname)
+        global_step = step + step_offset
         save_checkpoint(
             checkpoint_dir,
-            step,
+            global_step,
             orig_model.state_dict(),
             [opt.state_dict() for opt in optimizers], # TODO: make sure saving across ranks is done correctly
             {
-                "step": step,
+                "step": global_step,
                 "val_bpb": val_bpb, # loss at last step
                 "model_config": {
                     "sequence_len": max_seq_len,

@@ -281,13 +281,14 @@ if master_process:
     model_tag = f"d{depth}" # base the model tag on the depth of the base model
     checkpoint_dir = os.path.join(base_dir, "chatsft_checkpoints", model_tag)
     model_config_kwargs = model.config.__dict__ # slightly naughty, abusing the simplicity of GPTConfig, TODO nicer
+    global_step = step + step_offset
     save_checkpoint(
         checkpoint_dir,
-        step,
+        global_step,
         model.state_dict(),
         None, # note: we don't bother to save the optimizer state
         {
-            "step": step,
+            "step": global_step,
             "val_loss": val_loss,
             **metrics,
             "model_config": model_config_kwargs,
