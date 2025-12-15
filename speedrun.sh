@@ -102,14 +102,22 @@ curl -L -o $NANOCHAT_BASE_DIR/identity_conversations.jsonl https://karpathy-publ
 
 # run midtraining and eval the model
 torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.mid_train -- --run=${WANDB_RUN}-mid
-torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_eval -- -i mid
+EVAL_MID_WANDB_ARGS=()
+if [ "$WANDB_RUN" != "dummy" ]; then
+    EVAL_MID_WANDB_ARGS=(--wandb-run "${WANDB_RUN}-mid-eval")
+fi
+torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_eval -- -i mid "${EVAL_MID_WANDB_ARGS[@]}"
 
 # -----------------------------------------------------------------------------
 # Supervised Finetuning (domain adaptation to each sequence all by itself per row)
 
 # train sft and re-eval right away (should see a small bump)
 torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_sft -- --run=${WANDB_RUN}-sft
-torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_eval -- -i sft
+EVAL_SFT_WANDB_ARGS=()
+if [ "$WANDB_RUN" != "dummy" ]; then
+    EVAL_SFT_WANDB_ARGS=(--wandb-run "${WANDB_RUN}-sft-eval")
+fi
+torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_eval -- -i sft "${EVAL_SFT_WANDB_ARGS[@]}"
 
 # chat with the model over CLI! Leave out the -p to chat interactively
 # python -m scripts.chat_cli -p "Why is the sky blue?"
@@ -123,7 +131,11 @@ torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_eval -- -
 # run reinforcement learning
 torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_rl -- --run=${WANDB_RUN}-rl
 # eval the RL model only on GSM8K
-torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_eval -- -i rl -a GSM8K
+EVAL_RL_WANDB_ARGS=()
+if [ "$WANDB_RUN" != "dummy" ]; then
+    EVAL_RL_WANDB_ARGS=(--wandb-run "${WANDB_RUN}-rl-eval")
+fi
+torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_eval -- -i rl -a GSM8K "${EVAL_RL_WANDB_ARGS[@]}"
 
 # -----------------------------------------------------------------------------
 # Generate the full report by putting together all the sections

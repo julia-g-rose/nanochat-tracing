@@ -9,15 +9,17 @@ torchrun --nproc_per_node=8 -m scripts.chat_eval -- -a ARC-Easy
 """
 
 import argparse
+import os
 from functools import partial
 from contextlib import nullcontext
 
 import torch
 import torch.distributed as dist
+import wandb
 import weave
 from nanochat.weave_utils import init_weave
 
-from nanochat.common import compute_init, compute_cleanup, get_dist_info, print0, autodetect_device_type
+from nanochat.common import compute_init, compute_cleanup, get_dist_info, print0, autodetect_device_type, DummyWandb
 from nanochat.checkpoint_manager import load_model
 from nanochat.engine import Engine
 
@@ -239,6 +241,11 @@ if __name__ == "__main__":
     parser.add_argument('-s', '--step', type=int, default=None, help='Step to load')
     parser.add_argument('-x', '--max-problems', type=int, default=None, help='Max problems to evaluate')
     parser.add_argument('--device-type', type=str, default='', choices=['cuda', 'cpu', 'mps'], help='Device type for evaluation: cuda|cpu|mps. empty => autodetect')
+    # W&B / Weave logging (optional). By default we keep behavior "off" to avoid surprising logging.
+    parser.add_argument('--wandb-run', type=str, default="dummy", help='W&B run name. Use "dummy" to disable W&B/Weave logging.')
+    parser.add_argument('--wandb-project', type=str, default=None, help='W&B project override (defaults to $WANDB_PROJECT or "nanochat").')
+    parser.add_argument('--wandb-entity', type=str, default=None, help='W&B entity override (defaults to $WANDB_ENTITY).')
+    parser.add_argument('--wandb-resume-id', type=str, default=None, help='If set, resume the given W&B run id (use with care).')
     args = parser.parse_args()
 
     device_type = autodetect_device_type() if args.device_type == "" else args.device_type
@@ -247,10 +254,24 @@ if __name__ == "__main__":
     ptdtype = torch.float32 if args.dtype == 'float32' else torch.bfloat16
     autocast_ctx = torch.amp.autocast(device_type=device_type, dtype=ptdtype) if device_type == "cuda" else nullcontext()
     
-    # Initialize Weave for tracing (only on master process)
+    # Initialize W&B + Weave for tracing (only on master process).
+    # Without a W&B run, traces can show in the Traces tab but won't appear in Workspace views
+    # scoped to selected runs.
+    use_dummy_wandb = (args.wandb_run == "dummy") or (not master_process)
+    wandb_project = args.wandb_project or os.environ.get("WANDB_PROJECT", "nanochat")
+    wandb_entity = args.wandb_entity or os.environ.get("WANDB_ENTITY")
+    wandb_run = DummyWandb()
+    if not use_dummy_wandb:
+        wandb_init_kwargs = {"project": wandb_project, "name": args.wandb_run, "config": vars(args)}
+        if wandb_entity:
+            wandb_init_kwargs["entity"] = wandb_entity
+        if args.wandb_resume_id:
+            wandb_init_kwargs.update({"id": args.wandb_resume_id, "resume": "allow"})
+        wandb_run = wandb.init(**wandb_init_kwargs)
+
     if master_process:
         try:
-            init_weave(None, warn_fn=print0)
+            init_weave(wandb_run if not use_dummy_wandb else None, warn_fn=print0)
         except Exception as e:
             print0(f"⚠️ Could not initialize Weave tracing: {e}")
 
@@ -306,4 +327,6 @@ if __name__ == "__main__":
         chatcore_metric_dict,
     ])
 
+    if not use_dummy_wandb and master_process:
+        wandb_run.finish()
     compute_cleanup()
