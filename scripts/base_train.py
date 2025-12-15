@@ -61,7 +61,7 @@ eval_tokens = 20*524288 # number of tokens to evaluate val loss on
 core_metric_every = 2000 # every how many steps to evaluate the core metric (-1 = disable)
 core_metric_max_per_task = 500 # examples per task in estimating the core metric
 sample_every = 2000 # every how many steps to sample from the model
-save_every = core_metric_every # every how many steps to save model checkpoints (-1 = disable, and save only at the end of the run)
+save_every = -1 # every how many steps to save model checkpoints (-1 = disable, and save only at the end of the run)
 # Output
 model_tag = "" # optionally override the model tag for the output checkpoint directory name
 # now allow CLI to override the settings via the configurator lol
