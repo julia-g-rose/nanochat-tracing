@@ -1,0 +1,35 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  generateName: julia-nanochat-with-full-eval
+spec:
+  ttlSecondsAfterFinished: 86400 # auto-garbage-collect after 24 h
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: nanochat-train
+          image: <YOUR_DOCKERHUB_USERNAME>/nanochat:v<YOUR_VERSION_TAG>
+          imagePullPolicy: Always
+          env:
+            # Add W&B API key if you want to log to Weights & Biases
+            - name: WANDB_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: wandb-secrets
+                  key: WANDB_API_KEY
+            # REQUIRED for Weave tracing: Set your W&B username or team name
+            - name: WANDB_ENTITY
+              value: "wandb"  # Replace with your W&B username or team name
+            # Optional: Override the wandb project name (defaults to "nanochat")
+            - name: WANDB_PROJECT
+              value: "nanochat-public-demo"
+            # Set the run name (if not set, defaults to "dummy" which disables wandb logging)
+            - name: WANDB_RUN
+              value: "nanochat-train"
+          resources:
+            limits:
+              nvidia.com/gpu: 8  # Request 8 GPUs for full speedrun
+          # Uses default CMD from Dockerfile: bash speedrun.sh (runs all training stages)
+          # To run only a specific stage, uncomment and modify:
+          # command: ["torchrun", "--standalone", "--nproc_per_node=8", "-m", "scripts.base_train", "--", "--depth=20", "--run=nanochat-train-base"]
