@@ -105,8 +105,8 @@ def evaluate_model(model, tokenizer, device, max_per_task=-1, model_metadata=Non
             data = data[:max_per_task]
 
         # run the evaluation for this task
-        task_result = evaluate_task(model, tokenizer, data, device, task_meta)
-        accuracy = task_result["accuracy"]
+        # evaluate_task returns mean accuracy (float) for this task
+        accuracy = evaluate_task(model, tokenizer, data, device, task_meta)
 
         results[label] = accuracy
         random_baseline = random_baselines[label]
