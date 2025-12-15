@@ -23,7 +23,7 @@ from nanochat.checkpoint_manager import load_model
 from nanochat.checkpoint_manager import save_checkpoint
 from nanochat.engine import Engine
 from scripts.chat_eval import run_chat_eval
-from nanochat.common.weave_utils import init_weave
+from nanochat.weave_utils import init_weave
 
 from tasks.common import TaskMixture
 from tasks.arc import ARC

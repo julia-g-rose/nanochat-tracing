@@ -15,7 +15,7 @@ from contextlib import nullcontext
 import torch
 import torch.distributed as dist
 import weave
-from nanochat.common.weave_utils import init_weave
+from nanochat.weave_utils import init_weave
 
 from nanochat.common import compute_init, compute_cleanup, get_dist_info, print0, autodetect_device_type
 from nanochat.checkpoint_manager import load_model

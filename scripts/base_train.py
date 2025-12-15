@@ -28,7 +28,7 @@ from nanochat.checkpoint_manager import save_checkpoint, load_checkpoint
 from nanochat.loss_eval import evaluate_bpb
 from nanochat.engine import Engine
 from scripts.base_eval import evaluate_model
-from nanochat.common.weave_utils import init_weave
+from nanochat.weave_utils import init_weave
 print_banner()
 
 # -----------------------------------------------------------------------------

@@ -23,7 +23,7 @@ from nanochat.checkpoint_manager import save_checkpoint
 from nanochat.loss_eval import evaluate_bpb
 from nanochat.checkpoint_manager import load_model
 import torch.distributed as dist
-from nanochat.common.weave_utils import init_weave
+from nanochat.weave_utils import init_weave
 
 from tasks.common import TaskMixture
 from tasks.gsm8k import GSM8K
