@@ -344,6 +344,8 @@ for step in range(num_steps):
                 "step": global_step,
                 "model_config": model_config_kwargs,
             }
+            ,
+            wandb_run=wandb_run,
         )
         print(f"✅ Saved model checkpoint to {checkpoint_dir}")
 

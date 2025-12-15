@@ -238,6 +238,8 @@ while True:
                 },
                 "user_config": user_config, # inputs to the training script
             }
+            ,
+            wandb_run=wandb_run,
         )
 
     if last_step:
