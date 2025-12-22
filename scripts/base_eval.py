@@ -45,11 +45,10 @@ def place_eval_bundle(file_path):
         shutil.move(extracted_bundle_dir, eval_bundle_dir)
     print0(f"Placed eval_bundle directory at {eval_bundle_dir}")
 
-def evaluate_model(model, tokenizer, device, max_per_task=-1, model_metadata=None):
+def evaluate_model(model, tokenizer, device, max_per_task=-1):
     """
     Evaluate a base model on the CORE benchmark.
     - max_per_task: crop the data to this many examples per task for testing (-1 = disable)
-    - model_metadata: optional dict with training_step and other metadata for Weave logging
     """
     # Load config and task metadata
     base_dir = get_base_dir()
@@ -73,9 +72,6 @@ def evaluate_model(model, tokenizer, device, max_per_task=-1, model_metadata=Non
             random_baseline = row['Random baseline']
             random_baselines[task_name] = float(random_baseline)
 
-    # Extract training step for Weave logging
-    training_step = model_metadata.get('training_step') if model_metadata else None
-    
     # Evaluate each task
     results = {}
     centered_results = {}
@@ -83,12 +79,10 @@ def evaluate_model(model, tokenizer, device, max_per_task=-1, model_metadata=Non
         start_time = time.time()
         label = task['label']
         task_meta = {
-            'task_name': label,
             'task_type': task['icl_task_type'],
             'dataset_uri': task['dataset_uri'],
             'num_fewshot': task['num_fewshot'][0],
-            'continuation_delimiter': task.get('continuation_delimiter', ' '),
-            'training_step': training_step,
+            'continuation_delimiter': task.get('continuation_delimiter', ' ')
         }
         print0(f"Evaluating: {label} ({task_meta['num_fewshot']}-shot, type: {task_meta['task_type']})... ", end='')
 
@@ -105,7 +99,6 @@ def evaluate_model(model, tokenizer, device, max_per_task=-1, model_metadata=Non
             data = data[:max_per_task]
 
         # run the evaluation for this task
-        # evaluate_task returns mean accuracy (float) for this task
         accuracy = evaluate_task(model, tokenizer, data, device, task_meta)
 
         results[label] = accuracy
