@@ -272,20 +272,7 @@ def evaluate_example(idx, model, tokenizer, data, device, task_meta):
                     if isinstance(gold_idx, int) and 0 <= gold_idx < len(context_options)
                     else "unknown"
                 ),
-                # The shared suffix (same for all options). Without this, traces miss the
-                # end of the prompt that actually gets scored.
                 "continuation": continuation,
-                # Convenience: fully-rendered prompt strings for predicted and gold.
-                "predicted_prompt": (
-                    f"{context_options[pred_idx]}{continuation_delimiter}{continuation}"
-                    if isinstance(pred_idx, int) and 0 <= pred_idx < len(context_options)
-                    else "unknown"
-                ),
-                "gold_prompt": (
-                    f"{context_options[gold_idx]}{continuation_delimiter}{continuation}"
-                    if isinstance(gold_idx, int) and 0 <= gold_idx < len(context_options)
-                    else "unknown"
-                ),
             })
     else:
         raise ValueError(f"Unsupported task type: {task_type}")

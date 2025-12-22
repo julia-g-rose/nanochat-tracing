@@ -86,7 +86,6 @@ wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project=wandb_projec
 if not use_dummy_wandb and master_process:
     wandb_entity = os.environ.get("WANDB_ENTITY") or getattr(wandb_run, "entity", None)
     weave.init(f"{wandb_entity}/{wandb_project}")
-    print0(f"✅ Weave tracing initialized: {wandb_entity}/{wandb_project}")
 
 # Tokenizer will be useful for evaluation, also we need the vocab size
 tokenizer = get_tokenizer()
@@ -247,18 +246,7 @@ while True:
     if core_metric_every > 0 and (last_step or (step > 0 and step % core_metric_every == 0)):
         model.eval()
         with autocast_ctx:
-            # Pass model metadata for Weave tracking and comparison over time
-            eval_metadata = {
-                "model_source": "base",
-                "training_step": step,
-                "model_name": f"base_model_step_{step}",
-                "model_config": model_config_kwargs,
-                "val_bpb": val_bpb,
-                "total_training_flops": flops_so_far,
-            }
-            results = evaluate_model(orig_model, tokenizer, device, 
-                                    max_per_task=core_metric_max_per_task,
-                                    model_metadata=eval_metadata)
+            results = evaluate_model(orig_model, tokenizer, device, max_per_task=core_metric_max_per_task)
         print0(f"Step {step:05d} | CORE metric: {results['core_metric']:.4f}")
         wandb_run.log({
             "total_training_flops": flops_so_far,
@@ -308,12 +296,8 @@ while True:
                     "smooth_train_loss": smooth_train_loss,
                     "total_training_time": total_training_time,
                 },
-                # If we happened to run CORE eval this step, attach it to the checkpoint metadata.
-                "core_metric": results.get("core_metric"),
-                "centered_results": results.get("centered_results"),
             },
             rank=ddp_rank,
-            wandb_run=wandb_run,
         )
 
     # termination conditions (TODO: possibly also add loss explosions etc.)
