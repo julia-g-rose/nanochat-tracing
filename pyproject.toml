@@ -16,7 +16,6 @@ dependencies = [
     "torch>=2.8.0",
     "uvicorn>=0.36.0",
     "wandb>=0.21.3",
-    "weave>=0.51.26",
 ]
 
 [build-system]
@@ -68,6 +67,9 @@ cpu = [
 gpu = [  
     "torch>=2.8.0",  
 ]  
+weave = [
+    "weave>=0.51.26",
+]
   
 [tool.uv]  
 conflicts = [  

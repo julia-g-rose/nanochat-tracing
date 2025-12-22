@@ -5,12 +5,23 @@ https://arxiv.org/abs/2406.11794
 TODOs:
 - All tasks ~match except for squad. We get 31% reference is 37%. Figure out why.
 """
+import os
 import random
 
 from jinja2 import Template
 import torch
 import torch.distributed as dist
-import weave
+
+if os.environ.get("NANOCHAT_WEAVE"):
+    try:
+        import weave  # optional dependency; only required when tracing is enabled
+        weave_op = weave.op()
+    except Exception:
+        def weave_op(fn):
+            return fn
+else:
+    def weave_op(fn):
+        return fn
 
 # -----------------------------------------------------------------------------
 # Prompt rendering utilities
@@ -165,7 +176,7 @@ def forward_model(model, input_ids):
     return losses, predictions
 
 
-@weave.op()
+@weave_op
 @torch.no_grad()
 def evaluate_example(idx, model, tokenizer, data, device, task_meta):
     """Evaluate a single example, return True if correct, False otherwise"""

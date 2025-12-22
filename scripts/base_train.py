@@ -18,7 +18,6 @@ from contextlib import nullcontext
 
 import wandb
 import torch
-import weave
 
 from nanochat.gpt import GPT, GPTConfig
 from nanochat.dataloader import tokenizing_distributed_data_loader, tokenizing_distributed_data_loader_with_state
@@ -82,10 +81,19 @@ use_dummy_wandb = run == "dummy" or not master_process
 wandb_project = os.environ.get("WANDB_PROJECT", "nanochat")
 wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project=wandb_project, name=run, config=user_config)
 
-# Weave tracing init (for evaluation tracking during training)
-if not use_dummy_wandb and master_process:
-    wandb_entity = os.environ.get("WANDB_ENTITY") or getattr(wandb_run, "entity", None)
-    weave.init(f"{wandb_entity}/{wandb_project}")
+# wandb weave tracing - enable with NANOCHAT_WEAVE=1 and set WANDB_ENTITY
+if not use_dummy_wandb and master_process and os.environ.get("NANOCHAT_WEAVE"):
+    try:
+        import weave  # optional dependency; only required when tracing is enabled
+    except Exception:
+        print0("⚠️ Weave is not installed; tracing disabled. Install with `pip install -e '.[weave]'`.")
+    else:
+        wandb_entity = os.environ.get("WANDB_ENTITY") or getattr(wandb_run, "entity", None)
+        if wandb_entity:
+            weave.init(f"{wandb_entity}/{wandb_project}")
+            print0(f"✅ Weave tracing initialized: {wandb_entity}/{wandb_project}")
+        else:
+            print0("⚠️ Weave tracing disabled: WANDB_ENTITY not set (set WANDB_ENTITY to enable).")
 
 # Tokenizer will be useful for evaluation, also we need the vocab size
 tokenizer = get_tokenizer()
