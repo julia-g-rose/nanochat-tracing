@@ -28,7 +28,6 @@ from nanochat.checkpoint_manager import save_checkpoint, load_checkpoint
 from nanochat.loss_eval import evaluate_bpb
 from nanochat.engine import Engine
 from scripts.base_eval import evaluate_model
-from nanochat.weave_utils import init_weave
 print_banner()
 
 # -----------------------------------------------------------------------------
@@ -81,12 +80,13 @@ get_max_memory = torch.cuda.max_memory_allocated if device_type == "cuda" else l
 # wandb logging init
 use_dummy_wandb = run == "dummy" or not master_process
 wandb_project = os.environ.get("WANDB_PROJECT", "nanochat")
-wandb_entity = os.environ.get("WANDB_ENTITY")
 wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project=wandb_project, name=run, config=user_config)
 
 # Weave tracing init (for evaluation tracking during training)
 if not use_dummy_wandb and master_process:
-    init_weave(wandb_run, warn_fn=print0)
+    wandb_entity = os.environ.get("WANDB_ENTITY") or getattr(wandb_run, "entity", None)
+    weave.init(f"{wandb_entity}/{wandb_project}")
+    print0(f"✅ Weave tracing initialized: {wandb_entity}/{wandb_project}")
 
 # Tokenizer will be useful for evaluation, also we need the vocab size
 tokenizer = get_tokenizer()

@@ -15,18 +15,6 @@ import weave
 # -----------------------------------------------------------------------------
 # Prompt rendering utilities
 
-def _render_fewshot_prefix_mc(fewshot_examples, continuation_delimiter: str) -> str:
-    """Render the few-shot prefix exactly as in `render_prompts_mc` (but without current choice)."""
-    if not fewshot_examples:
-        return ""
-    parts = []
-    for ex in fewshot_examples:
-        # matches the jinja template: query + delimiter + correct choice, then a blank line
-        parts.append(f"{ex['query']}{continuation_delimiter}{ex['choices'][ex['gold']]}\n")
-    # there is an extra blank line between examples in the template, so join with '\n'
-    return "\n".join(parts) + "\n"
-
-
 def render_prompts_mc(item, continuation_delimiter, fewshot_examples=None):
     """Render complete prompts for a multiple choice question"""
     template_str = """
@@ -185,8 +173,6 @@ def evaluate_example(idx, model, tokenizer, data, device, task_meta):
     task_type = task_meta['task_type']
     num_fewshot = task_meta['num_fewshot']
     continuation_delimiter = task_meta['continuation_delimiter']
-    # Note: @weave.op() automatically traces inputs (including task_meta), so avoid
-    # duplicating task metadata in the returned payload.
     trace_payload: dict = {}
 
     # Sample few-shot examples (excluding current item)
@@ -263,34 +249,43 @@ def evaluate_example(idx, model, tokenizer, data, device, task_meta):
             "choice_mean_losses": mean_losses,
         })
         if task_type == 'multiple_choice':
-            # Trace structured prompt components instead of a single rendered prompt:
-            # 1) few-shot prefix, 2) query+delimiter
-            # Note: many CORE datasets embed the full choice text inside `item.query`, so
-            # tracing a separate `choices` list can be redundant (and sometimes only holds
-            # letters like A/B/C/D). We therefore omit it from the trace payload.
-            fewshot_prefix = _render_fewshot_prefix_mc(fewshot_examples, continuation_delimiter)
             query = f"{item.get('query', '')}{continuation_delimiter}"
             raw_choices = item.get("choices", []) or []
             trace_payload.update({
-                "fewshot_prefix": fewshot_prefix,
                 "query": query,
-                # Optional light debug helpers (usually letters A/B/C/D).
                 "predicted_choice_raw": raw_choices[pred_idx] if pred_idx < len(raw_choices) else "unknown",
                 "correct_choice_raw": raw_choices[item['gold']] if item.get("gold", -1) < len(raw_choices) else "unknown",
             })
         else:  # schema
             context_options = item.get("context_options", []) or []
             gold_idx = item.get("gold")
-            predicted_context = context_options[pred_idx] if pred_idx < len(context_options) else "unknown"
-            gold_context = (
-                context_options[gold_idx]
-                if isinstance(gold_idx, int) and 0 <= gold_idx < len(context_options)
-                else "unknown"
-            )
+            continuation = item.get("continuation", "")
             trace_payload.update({
                 "context_options": context_options,
-                "predicted_context": predicted_context,
-                "gold_context": gold_context,
+                "predicted_context": (
+                    context_options[pred_idx]
+                    if isinstance(pred_idx, int) and 0 <= pred_idx < len(context_options)
+                    else "unknown"
+                ),
+                "gold_context": (
+                    context_options[gold_idx]
+                    if isinstance(gold_idx, int) and 0 <= gold_idx < len(context_options)
+                    else "unknown"
+                ),
+                # The shared suffix (same for all options). Without this, traces miss the
+                # end of the prompt that actually gets scored.
+                "continuation": continuation,
+                # Convenience: fully-rendered prompt strings for predicted and gold.
+                "predicted_prompt": (
+                    f"{context_options[pred_idx]}{continuation_delimiter}{continuation}"
+                    if isinstance(pred_idx, int) and 0 <= pred_idx < len(context_options)
+                    else "unknown"
+                ),
+                "gold_prompt": (
+                    f"{context_options[gold_idx]}{continuation_delimiter}{continuation}"
+                    if isinstance(gold_idx, int) and 0 <= gold_idx < len(context_options)
+                    else "unknown"
+                ),
             })
     else:
         raise ValueError(f"Unsupported task type: {task_type}")
