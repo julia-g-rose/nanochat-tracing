@@ -86,8 +86,7 @@ wait $DATASET_DOWNLOAD_PID
 NPROC_PER_NODE=8
 
 # pretrain the d20 model
-# Append stage name to run name for better organization in wandb
-torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.base_train -- --depth=20 --run=${WANDB_RUN}-base
+torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.base_train -- --depth=20 --run=$WANDB_RUN
 # evaluate the model on a larger chunk of train/val data and draw some samples
 torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.base_loss
 # evaluate the model on CORE tasks
@@ -101,23 +100,15 @@ torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.base_eval
 curl -L -o $NANOCHAT_BASE_DIR/identity_conversations.jsonl https://karpathy-public.s3.us-west-2.amazonaws.com/identity_conversations.jsonl
 
 # run midtraining and eval the model
-torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.mid_train -- --run=${WANDB_RUN}-mid
-EVAL_MID_WANDB_ARGS=()
-if [ "$WANDB_RUN" != "dummy" ]; then
-    EVAL_MID_WANDB_ARGS=(--wandb-run "${WANDB_RUN}-mid-eval")
-fi
-torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_eval -- -i mid "${EVAL_MID_WANDB_ARGS[@]}"
+torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.mid_train -- --run=$WANDB_RUN
+torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_eval -- -i mid
 
 # -----------------------------------------------------------------------------
 # Supervised Finetuning (domain adaptation to each sequence all by itself per row)
 
 # train sft and re-eval right away (should see a small bump)
-torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_sft -- --run=${WANDB_RUN}-sft
-EVAL_SFT_WANDB_ARGS=()
-if [ "$WANDB_RUN" != "dummy" ]; then
-    EVAL_SFT_WANDB_ARGS=(--wandb-run "${WANDB_RUN}-sft-eval")
-fi
-torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_eval -- -i sft "${EVAL_SFT_WANDB_ARGS[@]}"
+torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_sft -- --run=$WANDB_RUN
+torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_eval -- -i sft
 
 # chat with the model over CLI! Leave out the -p to chat interactively
 # python -m scripts.chat_cli -p "Why is the sky blue?"
@@ -127,15 +118,12 @@ torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_eval -- -
 
 # -----------------------------------------------------------------------------
 # Reinforcement Learning. Optional, and currently only on GSM8K
+# (optional)
 
 # run reinforcement learning
-torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_rl -- --run=${WANDB_RUN}-rl
+# torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_rl -- --run=$WANDB_RUN
 # eval the RL model only on GSM8K
-EVAL_RL_WANDB_ARGS=()
-if [ "$WANDB_RUN" != "dummy" ]; then
-    EVAL_RL_WANDB_ARGS=(--wandb-run "${WANDB_RUN}-rl-eval")
-fi
-torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_eval -- -i rl -a GSM8K "${EVAL_RL_WANDB_ARGS[@]}"
+# torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_eval -- -i rl -a GSM8K
 
 # -----------------------------------------------------------------------------
 # Generate the full report by putting together all the sections
