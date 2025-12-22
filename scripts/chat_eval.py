@@ -9,17 +9,13 @@ torchrun --nproc_per_node=8 -m scripts.chat_eval -- -a ARC-Easy
 """
 
 import argparse
-import os
 from functools import partial
 from contextlib import nullcontext
 
 import torch
 import torch.distributed as dist
-import wandb
-import weave
-from nanochat.weave_utils import init_weave
 
-from nanochat.common import compute_init, compute_cleanup, get_dist_info, print0, autodetect_device_type, DummyWandb
+from nanochat.common import compute_init, compute_cleanup, get_dist_info, print0, autodetect_device_type
 from nanochat.checkpoint_manager import load_model
 from nanochat.engine import Engine
 
@@ -32,7 +28,7 @@ from tasks.spellingbee import SpellingBee
 # -----------------------------------------------------------------------------
 # Generative evaluation loop (we go one problem at a time, sample, evaluate)
 
-def run_generative_eval(task_name, task_object, tokenizer, model, engine, num_samples, max_new_tokens, temperature, top_k, max_problems=None):
+def run_generative_eval(task_object, tokenizer, model, engine, num_samples, max_new_tokens, temperature, top_k, max_problems=None):
 
     ddp, ddp_rank, ddp_local_rank, ddp_world_size = get_dist_info()
     device = model.get_device()
@@ -43,13 +39,23 @@ def run_generative_eval(task_name, task_object, tokenizer, model, engine, num_sa
     num_passed, total = 0, 0
     for i in range(ddp_rank, num_problems, ddp_world_size):
         conversation = task_object[i]
-        
-        # Evaluate this example (traced by Weave)
-        result = evaluate_generative_example(
-            task_name, conversation, task_object, tokenizer, engine, 
-            num_samples, max_new_tokens, temperature, top_k
+
+        # Tokenize the prompt
+        encoded_prompt = tokenizer.render_for_completion(conversation)
+        # Get the completions
+        results, _ = engine.generate_batch(
+            encoded_prompt,
+            num_samples=num_samples,
+            max_tokens=max_new_tokens,
+            temperature=temperature,
+            top_k=top_k,
         )
-        passed = result["passed"]
+        # Decode the completions as text
+        prefix_length = len(encoded_prompt)
+        completions = [tokenizer.decode(result_tokens[prefix_length:]) for result_tokens in results]
+        # Evaluate success criteria
+        outcomes = [task_object.evaluate(conversation, completion) for completion in completions]
+        passed = any(outcomes)
 
         # Keep stats
         total += 1
@@ -76,41 +82,12 @@ def run_generative_eval(task_name, task_object, tokenizer, model, engine, num_sa
     # Return the accuracy
     return num_passed/total
 
-
-@weave.op()
-def evaluate_generative_example(task_name, conversation, task_object, tokenizer, engine, num_samples, max_new_tokens, temperature, top_k):
-    """Evaluate a single generative example and return the result"""
-    # Tokenize the prompt
-    encoded_prompt = tokenizer.render_for_completion(conversation)
-    # Get the completions
-    results, _ = engine.generate_batch(
-        encoded_prompt,
-        num_samples=num_samples,
-        max_tokens=max_new_tokens,
-        temperature=temperature,
-        top_k=top_k,
-    )
-    # Decode the completions as text
-    prefix_length = len(encoded_prompt)
-    completions = [tokenizer.decode(result_tokens[prefix_length:]) for result_tokens in results]
-    # Evaluate success criteria
-    outcomes = [task_object.evaluate(conversation, completion) for completion in completions]
-    passed = any(outcomes)
-    
-    return {
-        "task_name": task_name,
-        "conversation": conversation,
-        "completions": completions,
-        "outcomes": outcomes,
-        "passed": passed,
-    }
-
 # -----------------------------------------------------------------------------
 # Categorical evaluation loop
 # A lot easier because we don't have to sample. Therefore, we can actually go
 # batches at a time and just check the logits for correct answer choices.
 
-def run_categorical_eval(task_name, task_object, tokenizer, model, batch_size, max_problems=None):
+def run_categorical_eval(task_object, tokenizer, model, batch_size, max_problems=None):
 
     ddp, ddp_rank, ddp_local_rank, ddp_world_size = get_dist_info()
     device = model.get_device()
@@ -159,11 +136,8 @@ def run_categorical_eval(task_name, task_object, tokenizer, model, batch_size, m
             # get the argmax letter (the predicted answer)
             argmax_letter_id = focus_logits.argmax(dim=-1).item()
             predicted_letter = letters[argmax_letter_id]
-            
-            # Evaluate this example (traced by Weave)
-            result = evaluate_categorical_example(task_name, conversation, predicted_letter, task_object)
-            outcome = result["is_correct"]
-            
+            # evaluate the outcome
+            outcome = task_object.evaluate(conversation, predicted_letter)
             num_passed += int(outcome)
             total += 1
 
@@ -179,26 +153,6 @@ def run_categorical_eval(task_name, task_object, tokenizer, model, batch_size, m
     average = num_passed/total
     print0(f"Final: {num_passed}/{total} ({100*average:.2f}%)")
     return average
-
-
-@weave.op()
-def evaluate_categorical_example(task_name, conversation, predicted_letter, task_object):
-    """Evaluate a single categorical (multiple choice) example"""
-    # Get the correct answer from the conversation itself.
-    # This matches the scoring logic inside tasks like ARC/MMLU, which compare against the
-    # ground-truth assistant message stored in the final message.
-    correct_letter = conversation.get('messages', [{}])[-1].get('content', '')
-    
-    # Evaluate the outcome
-    is_correct = task_object.evaluate(conversation, predicted_letter)
-    
-    return {
-        "task_name": task_name,
-        "question": conversation.get('question', conversation.get('messages', [{}])[0].get('content', '')),
-        "predicted_letter": predicted_letter,
-        "correct_letter": correct_letter,
-        "is_correct": is_correct,
-    }
 
 # -----------------------------------------------------------------------------
 
@@ -217,9 +171,9 @@ def run_chat_eval(task_name, model, tokenizer, engine,
     task_object = task_module()
     # Run the evaluation
     if task_object.eval_type == 'generative':
-        acc = run_generative_eval(task_name, task_object, tokenizer, model, engine, num_samples, max_new_tokens, temperature, top_k, max_problems=max_problems)
+        acc = run_generative_eval(task_object, tokenizer, model, engine, num_samples, max_new_tokens, temperature, top_k, max_problems=max_problems)
     elif task_object.eval_type == 'categorical':
-        acc = run_categorical_eval(task_name, task_object, tokenizer, model, batch_size, max_problems=max_problems)
+        acc = run_categorical_eval(task_object, tokenizer, model, batch_size, max_problems=max_problems)
     else:
         raise ValueError(f"Unsupported task evaluation type: {task_object.eval_type}")
     return acc
@@ -241,39 +195,12 @@ if __name__ == "__main__":
     parser.add_argument('-s', '--step', type=int, default=None, help='Step to load')
     parser.add_argument('-x', '--max-problems', type=int, default=None, help='Max problems to evaluate')
     parser.add_argument('--device-type', type=str, default='', choices=['cuda', 'cpu', 'mps'], help='Device type for evaluation: cuda|cpu|mps. empty => autodetect')
-    # W&B / Weave logging (optional). By default we keep behavior "off" to avoid surprising logging.
-    parser.add_argument('--wandb-run', type=str, default="dummy", help='W&B run name. Use "dummy" to disable W&B/Weave logging.')
-    parser.add_argument('--wandb-project', type=str, default=None, help='W&B project override (defaults to $WANDB_PROJECT or "nanochat").')
-    parser.add_argument('--wandb-entity', type=str, default=None, help='W&B entity override (defaults to $WANDB_ENTITY).')
-    parser.add_argument('--wandb-resume-id', type=str, default=None, help='If set, resume the given W&B run id (use with care).')
     args = parser.parse_args()
 
     device_type = autodetect_device_type() if args.device_type == "" else args.device_type
     ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
-    master_process = ddp_rank == 0
     ptdtype = torch.float32 if args.dtype == 'float32' else torch.bfloat16
     autocast_ctx = torch.amp.autocast(device_type=device_type, dtype=ptdtype) if device_type == "cuda" else nullcontext()
-    
-    # Initialize W&B + Weave for tracing (only on master process).
-    # Without a W&B run, traces can show in the Traces tab but won't appear in Workspace views
-    # scoped to selected runs.
-    use_dummy_wandb = (args.wandb_run == "dummy") or (not master_process)
-    wandb_project = args.wandb_project or os.environ.get("WANDB_PROJECT", "nanochat")
-    wandb_entity = args.wandb_entity or os.environ.get("WANDB_ENTITY")
-    wandb_run = DummyWandb()
-    if not use_dummy_wandb:
-        wandb_init_kwargs = {"project": wandb_project, "name": args.wandb_run, "config": vars(args)}
-        if wandb_entity:
-            wandb_init_kwargs["entity"] = wandb_entity
-        if args.wandb_resume_id:
-            wandb_init_kwargs.update({"id": args.wandb_resume_id, "resume": "allow"})
-        wandb_run = wandb.init(**wandb_init_kwargs)
-
-    if master_process:
-        try:
-            init_weave(wandb_run if not use_dummy_wandb else None, warn_fn=print0)
-        except Exception as e:
-            print0(f"⚠️ Could not initialize Weave tracing: {e}")
 
     model, tokenizer, meta = load_model(args.source, device, phase="eval", model_tag=args.model_tag, step=args.step)
     engine = Engine(model, tokenizer)
@@ -327,6 +254,4 @@ if __name__ == "__main__":
         chatcore_metric_dict,
     ])
 
-    if not use_dummy_wandb and master_process:
-        wandb_run.finish()
     compute_cleanup()

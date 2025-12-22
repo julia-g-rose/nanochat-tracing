@@ -20,7 +20,6 @@ import os
 import itertools
 import re
 import wandb
-import weave
 import torch
 import torch.distributed as dist
 
@@ -28,7 +27,6 @@ from nanochat.common import compute_init, compute_cleanup, print0, get_base_dir,
 from nanochat.checkpoint_manager import save_checkpoint, load_model
 from nanochat.engine import Engine
 from tasks.gsm8k import GSM8K
-from nanochat.weave_utils import init_weave
 
 # RL hyperparameters
 run = "dummy" # wandb run name
@@ -63,20 +61,11 @@ autocast_ctx = torch.amp.autocast(device_type="cuda", dtype=dtype)
 
 # wandb logging init
 use_dummy_wandb = run == "dummy" or not master_process
-wandb_project = os.environ.get("WANDB_PROJECT", "nanochat")
-wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project=wandb_project, name=run, config=user_config)
-
-# Weave tracing init (for evaluation tracking during training)
-if not use_dummy_wandb and master_process:
-    init_weave(wandb_run, warn_fn=print0)
+wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanochat-rl", name=run, config=user_config)
 
 # Init model and tokenizer
 model, tokenizer, meta = load_model(source, device, phase="eval")
 engine = Engine(model, tokenizer) # for sampling rollouts
-
-# Get step offset from previous phase for continuous step counting in wandb
-step_offset = meta.get("step", 0)
-print0(f"Continuing from {source} training step {step_offset}")
 
 # -----------------------------------------------------------------------------
 # Rollout / sampling generator loop that yields batches of examples for training
@@ -152,36 +141,6 @@ def get_batch():
 
 # -----------------------------------------------------------------------------
 # Simple evaluation loop for GSM8K pass@k
-
-@weave.op()
-def evaluate_gsm8k_example(conversation, task, tokenizer, engine, num_samples, max_completion_tokens, temperature, top_k):
-    """Evaluate a single GSM8K example with multiple samples (mirrors original logic)."""
-    tokens = tokenizer.render_for_completion(conversation)
-    prefix_length = len(tokens)
-
-    assert num_samples <= device_batch_size
-    generated_token_sequences, masks = engine.generate_batch(
-        tokens,
-        num_samples=num_samples,
-        max_tokens=max_completion_tokens,
-        temperature=temperature,
-        top_k=top_k,
-    )
-
-    outcomes = []
-    for sample_tokens in generated_token_sequences:
-        generated_tokens = sample_tokens[prefix_length:]
-        generated_text = tokenizer.decode(generated_tokens)
-        is_correct = task.evaluate(conversation, generated_text)
-        outcomes.append({
-            "completion": generated_text,
-            "is_correct": is_correct,
-        })
-
-    return {
-        "outcomes": outcomes,
-    }
-
 def run_gsm8k_eval(task, tokenizer, engine,
     max_examples=None,
     num_samples=1,
@@ -198,16 +157,30 @@ def run_gsm8k_eval(task, tokenizer, engine,
     max_examples = min(max_examples, len(task)) if max_examples is not None else len(task)
     for idx in range(ddp_rank, max_examples, ddp_world_size):
         conversation = task[idx]
-        
-        # Evaluate this example (traced by Weave)
-        result = evaluate_gsm8k_example(
-            conversation, task, tokenizer, engine,
-            num_samples, max_completion_tokens, temperature, top_k
+        tokens = tokenizer.render_for_completion(conversation)
+        prefix_length = len(tokens)
+        # Generate k samples using batched generation inside the Engine
+        assert num_samples <= device_batch_size # usually this is true. we can add a loop if not...
+        generated_token_sequences, masks = engine.generate_batch(
+            tokens,
+            num_samples=num_samples,
+            max_tokens=max_completion_tokens,
+            temperature=temperature,
+            top_k=top_k
         )
-        
+        # Check each sample for correctness
+        outcomes = []
+        for sample_tokens in generated_token_sequences:
+            generated_tokens = sample_tokens[prefix_length:]
+            generated_text = tokenizer.decode(generated_tokens)
+            is_correct = task.evaluate(conversation, generated_text)
+            outcomes.append({
+                "is_correct": is_correct
+            })
+        # A bit bloated because I wanted to do more complex logging at one point.
         record = {
             "idx": idx,
-            "outcomes": result["outcomes"],
+            "outcomes": outcomes,
         }
         yield record
 
@@ -261,8 +234,9 @@ for step in range(num_steps):
         print0(f"Step {step} | {', '.join(print_passk)}")
         log_passk = {f"pass@{k}": passk[k - 1].item() for k in range(1, device_batch_size + 1)}
         wandb_run.log({
+            "step": step,
             **log_passk,
-        }, step=step + step_offset)
+        })
 
     # Forward/Backward on rollouts over multiple examples in the dataset
     rewards_list = []
@@ -311,9 +285,10 @@ for step in range(num_steps):
         mean_sequence_length = mean_sequence_length_tensor.item()
     print0(f"Step {step}/{num_steps} | Average reward: {mean_reward} | Average sequence length: {mean_sequence_length:.2f}")
     wandb_run.log({
+        "step": step,
         "reward": mean_reward,
         "sequence_length": mean_sequence_length,
-    }, step=step + step_offset)
+    })
 
     # Update the model parameters
     lrm = get_lr_multiplier(step)
@@ -324,8 +299,9 @@ for step in range(num_steps):
         opt.step()
     model.zero_grad(set_to_none=True)
     wandb_run.log({
+        "step": step,
         "lrm": lrm,
-    }, step=step + step_offset)
+    })
 
     # Master process saves the model once in a while. Skip first step. Save last step.
     if master_process and ((step > 0 and step % save_every == 0) or step == num_steps - 1):
@@ -334,18 +310,14 @@ for step in range(num_steps):
         model_tag = f"d{depth}" # base the model tag on the depth of the base model
         checkpoint_dir = os.path.join(base_dir, "chatrl_checkpoints", model_tag)
         model_config_kwargs = model.config.__dict__ # slightly naughty, abusing the simplicity of GPTConfig, TODO nicer
-        global_step = step + step_offset
         save_checkpoint(
             checkpoint_dir,
-            global_step,
+            step,
             model.state_dict(),
             None, # note: we don't bother to save the optimizer state
             {
-                "step": global_step,
                 "model_config": model_config_kwargs,
             }
-            ,
-            wandb_run=wandb_run,
         )
         print(f"✅ Saved model checkpoint to {checkpoint_dir}")
 

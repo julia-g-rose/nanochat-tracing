@@ -20,7 +20,7 @@ def log0(message):
     if int(os.environ.get('RANK', 0)) == 0:
         logger.info(message)
 
-def save_checkpoint(checkpoint_dir, step, model_data, optimizer_data, meta_data, rank=0, wandb_run=None):
+def save_checkpoint(checkpoint_dir, step, model_data, optimizer_data, meta_data, rank=0):
     if rank == 0:
         os.makedirs(checkpoint_dir, exist_ok=True)
         # Save the model state parameters
@@ -32,97 +32,12 @@ def save_checkpoint(checkpoint_dir, step, model_data, optimizer_data, meta_data,
         with open(meta_path, "w", encoding="utf-8") as f:
             json.dump(meta_data, f, indent=2)
         logger.info(f"Saved metadata to: {meta_path}")
-        
-        # Upload checkpoint to wandb as artifact if wandb_run is provided
-        if wandb_run is not None and hasattr(wandb_run, 'log_artifact'):
-            try:
-                import wandb
-                # Create artifact with metadata
-                artifact_name = f"checkpoint-step-{step}"
-                artifact = wandb.Artifact(
-                    name=artifact_name,
-                    type="model",
-                    metadata={
-                        "step": step,
-                        **meta_data
-                    }
-                )
-                
-                # Add checkpoint files
-                artifact.add_file(model_path, name=f"model_{step:06d}.pt")
-                artifact.add_file(meta_path, name=f"meta_{step:06d}.json")
-                
-                # Add tokenizer files (critical for inference!)
-                base_dir = get_base_dir()
-                tokenizer_dir = os.path.join(base_dir, "tokenizer")
-                tokenizer_pkl = os.path.join(tokenizer_dir, "tokenizer.pkl")
-                token_bytes_pt = os.path.join(tokenizer_dir, "token_bytes.pt")
-                
-                if os.path.exists(tokenizer_pkl):
-                    artifact.add_file(tokenizer_pkl, name="tokenizer/tokenizer.pkl")
-                    logger.info(f"Added tokenizer to artifact: {tokenizer_pkl}")
-                else:
-                    logger.warning(f"Tokenizer not found at {tokenizer_pkl}, skipping")
-                
-                if os.path.exists(token_bytes_pt):
-                    artifact.add_file(token_bytes_pt, name="tokenizer/token_bytes.pt")
-                    logger.info(f"Added token_bytes to artifact: {token_bytes_pt}")
-                else:
-                    logger.warning(f"Token bytes not found at {token_bytes_pt}, skipping")
-                
-                # Log artifact with step as alias
-                wandb_run.log_artifact(artifact, aliases=[f"step_{step}", "latest"])
-                logger.info(f"✅ Uploaded checkpoint to wandb as artifact: {artifact_name}")
-                
-            except Exception as e:
-                logger.warning(f"Failed to upload checkpoint to wandb: {e}")
     # Note that optimizer state is sharded across ranks, so each rank must save its own.
     if optimizer_data is not None:
         os.makedirs(checkpoint_dir, exist_ok=True)
         optimizer_path = os.path.join(checkpoint_dir, f"optim_{step:06d}_rank{rank:d}.pt")
         torch.save(optimizer_data, optimizer_path)
         logger.info(f"Saved optimizer state to: {optimizer_path}")
-
-def download_checkpoint_from_wandb(entity, project, artifact_name, download_dir=None):
-    """
-    Download a checkpoint artifact from WandB.
-    
-    Args:
-        entity: WandB entity (username or team name)
-        project: WandB project name
-        artifact_name: Name or alias of the artifact (e.g., "checkpoint-step-1000:latest")
-        download_dir: Optional directory to download to. If None, uses a temp directory.
-    
-    Returns:
-        Path to the downloaded artifact directory
-    """
-    try:
-        import wandb
-        api = wandb.Api()
-        artifact_path = f"{entity}/{project}/{artifact_name}"
-        logger.info(f"Downloading artifact from WandB: {artifact_path}")
-        artifact = api.artifact(artifact_path)
-        download_path = artifact.download(root=download_dir)
-        logger.info(f"✅ Downloaded artifact to: {download_path}")
-        
-        # If tokenizer files were included, copy them to the expected location
-        tokenizer_pkl = os.path.join(download_path, "tokenizer", "tokenizer.pkl")
-        token_bytes_pt = os.path.join(download_path, "tokenizer", "token_bytes.pt")
-        
-        if os.path.exists(tokenizer_pkl) and os.path.exists(token_bytes_pt):
-            base_dir = get_base_dir()
-            tokenizer_dir = os.path.join(base_dir, "tokenizer")
-            os.makedirs(tokenizer_dir, exist_ok=True)
-            
-            import shutil
-            shutil.copy2(tokenizer_pkl, os.path.join(tokenizer_dir, "tokenizer.pkl"))
-            shutil.copy2(token_bytes_pt, os.path.join(tokenizer_dir, "token_bytes.pt"))
-            logger.info(f"✅ Copied tokenizer files to: {tokenizer_dir}")
-        
-        return download_path
-    except Exception as e:
-        logger.error(f"Failed to download checkpoint from wandb: {e}")
-        raise
 
 def load_checkpoint(checkpoint_dir, step, device, load_optimizer=False, rank=0):
     # Load the model state
@@ -224,35 +139,6 @@ def load_model_from_dir(checkpoints_dir, device, phase, model_tag=None, step=Non
     log0(f"Loading model from {checkpoint_dir} with step {step}")
     model, tokenizer, meta_data = build_model(checkpoint_dir, step, device, phase)
     return model, tokenizer, meta_data
-
-def load_model_from_wandb(entity, project, artifact_name, device, phase):
-    """
-    Load a model directly from a WandB artifact.
-    
-    Args:
-        entity: WandB entity (username or team name)
-        project: WandB project name
-        artifact_name: Name or alias of the artifact (e.g., "checkpoint-step-1000:latest")
-        device: Device to load the model on
-        phase: "train" or "eval"
-    
-    Returns:
-        model, tokenizer, meta_data
-    """
-    # Download the artifact
-    artifact_dir = download_checkpoint_from_wandb(entity, project, artifact_name)
-    
-    # Find the model file in the downloaded artifact
-    model_files = glob.glob(os.path.join(artifact_dir, "model_*.pt"))
-    if not model_files:
-        raise FileNotFoundError(f"No model file found in artifact: {artifact_dir}")
-    
-    # Extract step from filename
-    model_file = model_files[0]
-    step = int(os.path.basename(model_file).split("_")[-1].split(".")[0])
-    
-    # Build and return the model
-    return build_model(artifact_dir, step, device, phase)
 
 def load_model(source, *args, **kwargs):
     model_dir = {

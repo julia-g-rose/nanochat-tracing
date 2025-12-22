@@ -15,7 +15,6 @@ os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 import time
 import wandb
 import torch
-import weave
 from contextlib import nullcontext
 from nanochat.common import compute_init, compute_cleanup, print0, DummyWandb, get_base_dir, autodetect_device_type
 from nanochat.tokenizer import get_token_bytes
@@ -23,7 +22,6 @@ from nanochat.checkpoint_manager import save_checkpoint
 from nanochat.loss_eval import evaluate_bpb
 from nanochat.checkpoint_manager import load_model
 import torch.distributed as dist
-from nanochat.weave_utils import init_weave
 
 from tasks.common import TaskMixture
 from tasks.gsm8k import GSM8K
@@ -65,22 +63,13 @@ get_max_memory = torch.cuda.max_memory_allocated if device_type == "cuda" else l
 
 # wandb logging init
 use_dummy_wandb = run == "dummy" or not master_process
-wandb_project = os.environ.get("WANDB_PROJECT", "nanochat")
-wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project=wandb_project, name=run, config=user_config)
-
-# Weave tracing init (for evaluation tracking during training)
-if not use_dummy_wandb and master_process:
-    init_weave(wandb_run, warn_fn=print0)
+wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanochat-mid", name=run, config=user_config)
 
 # Load the model and tokenizer
 model, tokenizer, meta = load_model("base", device, phase="train", model_tag=model_tag, step=step)
 pretrain_batch_size = meta.get("device_batch_size", None)
 if pretrain_batch_size is not None and device_batch_size > pretrain_batch_size:
     print0(f"FOOTGUN WARNING: base model training used device_batch_size {pretrain_batch_size}, did you pass in a good --device_batch_size to this script?")
-
-# Get step offset from previous phase for continuous step counting in wandb
-step_offset = meta.get("step", 0)
-print0(f"Continuing from base training step {step_offset}")
 orig_model = model
 model = torch.compile(model, dynamic=False)
 depth = model.config.n_layer
@@ -209,24 +198,24 @@ while True:
         if val_bpb < min_val_bpb:
             min_val_bpb = val_bpb
         wandb_run.log({
+            "step": step,
             "total_training_flops": flops_so_far,
             "total_training_time": total_training_time,
             "val/bpb": val_bpb,
-        }, step=step + step_offset)
+        })
         model.train()
 
     # save checkpoint at the end of the run (only on master process)
     if master_process and last_step and not dry_run:
         output_dirname = f"d{depth}" # e.g. d12
         checkpoint_dir = os.path.join(base_dir, "mid_checkpoints", output_dirname)
-        global_step = step + step_offset
         save_checkpoint(
             checkpoint_dir,
-            global_step,
+            step,
             orig_model.state_dict(),
             [opt.state_dict() for opt in optimizers], # TODO: make sure saving across ranks is done correctly
             {
-                "step": global_step,
+                "step": step,
                 "val_bpb": val_bpb, # loss at last step
                 "model_config": {
                     "sequence_len": max_seq_len,
@@ -238,8 +227,6 @@ while True:
                 },
                 "user_config": user_config, # inputs to the training script
             }
-            ,
-            wandb_run=wandb_run,
         )
 
     if last_step:
@@ -290,6 +277,7 @@ while True:
     print0(f"step {step:05d} ({pct_done:.2f}%) | loss: {debiased_smooth_loss:.6f} | lrm: {lrm:.2f} | dt: {dt * 1000:.2f}ms | tok/sec: {tok_per_sec:,} | mfu: {mfu:.2f} | total time: {total_training_time/60:.2f}m")
     if step % 10 == 0:
         wandb_run.log({
+            "step": step,
             "total_training_flops": flops_so_far,
             "total_training_time": total_training_time,
             "train/loss": debiased_smooth_loss,
@@ -297,7 +285,7 @@ while True:
             "train/dt": dt,
             "train/tok_per_sec": tok_per_sec,
             "train/mfu": mfu,
-        }, step=step + step_offset)
+        })
 
 # print a few more stats
 print0(f"Peak memory usage: {get_max_memory() / 1024 / 1024:.2f}MiB")

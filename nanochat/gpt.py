@@ -153,10 +153,6 @@ class GPT(nn.Module):
         self.register_buffer("cos", cos, persistent=False) # persistent=False means it's not saved to the checkpoint
         self.register_buffer("sin", sin, persistent=False)
 
-    def __repr__(self):
-        """Return simple model name for cleaner Weave traces instead of full architecture."""
-        return "Nanochat"
-
     def init_weights(self):
         self.apply(self._init_weights)
         # zero out classifier weights

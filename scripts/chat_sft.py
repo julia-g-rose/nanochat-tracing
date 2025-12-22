@@ -13,7 +13,6 @@ import os
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 import wandb
-import weave
 import torch
 import torch.distributed as dist
 from contextlib import nullcontext
@@ -23,7 +22,6 @@ from nanochat.checkpoint_manager import load_model
 from nanochat.checkpoint_manager import save_checkpoint
 from nanochat.engine import Engine
 from scripts.chat_eval import run_chat_eval
-from nanochat.weave_utils import init_weave
 
 from tasks.common import TaskMixture
 from tasks.arc import ARC
@@ -72,22 +70,13 @@ autocast_ctx = torch.amp.autocast(device_type=device_type, dtype=ptdtype) if dev
 
 # wandb logging init
 use_dummy_wandb = run == "dummy" or not master_process
-wandb_project = os.environ.get("WANDB_PROJECT", "nanochat")
-wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project=wandb_project, name=run, config=user_config, save_code=True)
-
-# Weave tracing init (for evaluation tracking during training)
-if not use_dummy_wandb and master_process:
-    init_weave(wandb_run, warn_fn=print0)
+wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanochat-sft", name=run, config=user_config, save_code=True)
 
 # Load the model and tokenizer
 model, tokenizer, meta = load_model(source, device, phase="train", model_tag=model_tag, step=step)
 orig_model = model # original, uncompiled model
 # model = torch.compile(model, dynamic=True) # doesn't work super well because of variable lengths of inputs
 engine = Engine(model, tokenizer) # will be used for inline model evaluation only
-
-# Get step offset from previous phase for continuous step counting in wandb
-step_offset = meta.get("step", 0)
-print0(f"Continuing from {source} training step {step_offset}")
 
 # -----------------------------------------------------------------------------
 # Task data mixture we'll train on
@@ -197,8 +186,9 @@ for step in range(num_iterations):
         val_loss = val_loss.item()
         print0(f"Step {step:05d} | Validation loss: {val_loss:.6f}")
         wandb_run.log({
+            "step": step,
             "val_loss": val_loss,
-        }, step=step + step_offset)
+        })
         model.train()
 
     # evaluate accuracy of the multiple choice tasks (which are quick to run)
@@ -212,8 +202,9 @@ for step in range(num_iterations):
         metrics_str = ', '.join(f'{k}: {v:.6f}' for k, v in metrics.items())
         print0(f"Step {step:05d} | {metrics_str}")
         wandb_run.log({
+            "step": step,
             **metrics,
-        }, step=step + step_offset)
+        })
         model.train()
 
     if last_step:
@@ -248,10 +239,11 @@ for step in range(num_iterations):
     num_tokens_item = num_tokens.item()
     print0(f"Step {step:05d}/{num_iterations:05d} | Training loss: {train_loss_item:.6f}| lrm: {lrm:.6f}| num_tokens: {num_tokens_item:,}")
     wandb_run.log({
+        "step": step,
         "lrm": lrm,
         "train_loss": train_loss_item,
         "num_tokens": num_tokens_item,
-    }, step=step + step_offset)
+    })
     step += 1
 
 # Save the model at the end of the run
@@ -261,20 +253,17 @@ if master_process:
     model_tag = f"d{depth}" # base the model tag on the depth of the base model
     checkpoint_dir = os.path.join(base_dir, "chatsft_checkpoints", model_tag)
     model_config_kwargs = model.config.__dict__ # slightly naughty, abusing the simplicity of GPTConfig, TODO nicer
-    global_step = step + step_offset
     save_checkpoint(
         checkpoint_dir,
-        global_step,
+        step,
         model.state_dict(),
         None, # note: we don't bother to save the optimizer state
         {
-            "step": global_step,
+            "step": step,
             "val_loss": val_loss,
             **metrics,
             "model_config": model_config_kwargs,
         }
-        ,
-        wandb_run=wandb_run,
     )
     print(f"✅ Saved model checkpoint to {checkpoint_dir}")
 
