@@ -5,3 +5,9 @@ rustbpe/target/
 dev-ignore/
 report.md
 eval_bundle/
+.env
+CWKubeconfig_cks-wb3
+wandb.env
+*k8s_job.yaml
+build_and_push.sh
+DOCKERFILE
