@@ -13,7 +13,10 @@ spec:
       restartPolicy: Never
       containers:
         - name: nanochat-train
-          image: juliarosewandb/nanochat:short-run
+          # Pinned by digest: a mutable tag was serving a stale cached image on
+          # the node (CoreWeave registry cache). Digest refs are immutable, so the
+          # node always gets exactly this content. Re-pin after each rebuild.
+          image: juliarosewandb/nanochat@sha256:9c71bca954bd81ed683c7fbdd064c1838a62646d9248b8ff5ef1ed941973db15
           imagePullPolicy: Always
           env:
             # Required for wandb logging. Stored as a k8s secret (see README).
