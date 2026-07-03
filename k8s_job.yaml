@@ -6,6 +6,10 @@ spec:
   ttlSecondsAfterFinished: 86400 # auto-garbage-collect after 24 h
   template:
     spec:
+      # CoreWeave admission policy requires GPU pods to use the binpack scheduler
+      # and to bound their lifetime (activeDeadlineSeconds <= 604800s / 7 days).
+      schedulerName: binpack-scheduler
+      activeDeadlineSeconds: 86400
       restartPolicy: Never
       containers:
         - name: nanochat-train
@@ -34,9 +38,12 @@ spec:
             # enabled at the wandb org + team level, or it's silently skipped.
             - name: WANDB_SAVE_CODE
               value: "true"
+            # GPUs for torchrun (must match the nvidia.com/gpu limit below).
+            - name: NPROC_PER_NODE
+              value: "4"
           resources:
             limits:
-              nvidia.com/gpu: 8 # full 8XH100 node
+              nvidia.com/gpu: 4 # smoke test; bump to 8 for a real run when a full node is free
           # Full pipeline end-to-end (tokenizer -> pretrain -> base eval -> SFT ->
           # chat eval) but with tiny settings so it finishes in minutes. This is a
           # smoke test of the whole path, not a real training run. See runs/smoke.sh.
