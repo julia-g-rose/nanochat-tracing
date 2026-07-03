@@ -16,7 +16,7 @@ spec:
           # Pinned by digest: a mutable tag was serving a stale cached image on
           # the node (CoreWeave registry cache). Digest refs are immutable, so the
           # node always gets exactly this content. Re-pin after each rebuild.
-          image: juliarosewandb/nanochat@sha256:1942065ce31c4e79e114a1f5a6d05d364a4afa6a8f575b71f49407bc53ca0782
+          image: juliarosewandb/nanochat@sha256:01a3d18270f04eccf9da2faf028f8a93738dcd2212db932f1e49623b906d2f9f
           imagePullPolicy: Always
           env:
             # Required for wandb logging. Stored as a k8s secret (see README).
