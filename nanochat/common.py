@@ -220,6 +220,8 @@ class DummyWandb:
         pass
     def log_code(self, *args, **kwargs):
         pass
+    def log_artifact(self, *args, **kwargs):
+        pass
     def finish(self):
         pass
 

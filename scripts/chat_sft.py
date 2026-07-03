@@ -421,6 +421,12 @@ while True:
             },
             rank=ddp_rank,
         )
+        # Also log the checkpoint to wandb as a versioned model artifact
+        if not use_dummy_wandb:
+            artifact = wandb.Artifact(f"chat_sft_model-{args.run}", type="model", metadata={"step": step})
+            artifact.add_file(os.path.join(checkpoint_dir, f"model_{step:06d}.pt"))
+            artifact.add_file(os.path.join(checkpoint_dir, f"meta_{step:06d}.json"))
+            wandb_run.log_artifact(artifact)
 
     if last_step:
         break
