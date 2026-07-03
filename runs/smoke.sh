@@ -41,10 +41,12 @@ torchrun --standalone --nproc_per_node=$NPROC -m scripts.base_train -- \
   --sample-every=-1 --eval-tokens=4096 --run=$WANDB_RUN
 
 # -----------------------------------------------------------------------------
-# Base eval (CORE / BPB / sample). CORE tasks are few-shot (up to ~10-shot),
-# so max-per-task must stay above the few-shot count or rng.sample() fails.
+# Base eval. We run only BPB + sampling in the smoke test: CORE tasks are
+# few-shot and their few-shot pool is the (subsampled) task data, so any
+# aggressive --max-per-task can drop below a task's num_fewshot and crash
+# rng.sample(). CORE runs fine in the real pipeline (full pool, max_per_task=-1).
 torchrun --standalone --nproc_per_node=$NPROC -m scripts.base_eval -- \
-  --max-per-task=32 --split-tokens=16384 --device-batch-size=8 --run=$WANDB_RUN
+  --eval bpb,sample --split-tokens=16384 --device-batch-size=8 --run=$WANDB_RUN
 
 # -----------------------------------------------------------------------------
 # SFT — teach chat special tokens etc. Small identity dataset + few steps.
