@@ -30,8 +30,9 @@ import zipfile
 import tempfile
 import argparse
 import torch
+import wandb
 
-from nanochat.common import compute_init, compute_cleanup, print0, get_base_dir, autodetect_device_type, download_file_with_lock
+from nanochat.common import compute_init, compute_cleanup, print0, get_base_dir, autodetect_device_type, download_file_with_lock, DummyWandb
 from nanochat.tokenizer import HuggingFaceTokenizer, get_token_bytes
 from nanochat.checkpoint_manager import load_model
 from nanochat.core_eval import evaluate_task
@@ -185,6 +186,7 @@ def main():
     parser.add_argument('--device-batch-size', type=int, default=32, help='Per-device batch size for BPB evaluation')
     parser.add_argument('--split-tokens', type=int, default=40*524288, help='Number of tokens to evaluate per split for BPB')
     parser.add_argument('--device-type', type=str, default='', help='cuda|cpu|mps (empty = autodetect)')
+    parser.add_argument('--run', type=str, default='dummy', help="wandb run name ('dummy' disables wandb logging)")
     args = parser.parse_args()
 
     # Parse evaluation modes
@@ -197,6 +199,10 @@ def main():
     # Distributed / precision setup
     device_type = autodetect_device_type() if args.device_type == '' else args.device_type
     ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
+    # wandb logging (only on the master process; "dummy" disables logging)
+    use_dummy_wandb = args.run == "dummy" or ddp_rank != 0
+    wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project=os.environ.get("WANDB_PROJECT", "nanochat"), name=f"{args.run}-base-eval")
+    wandb_run.log_code(root=".") # capture full source tree in wandb
     # Load model and tokenizer
     is_hf_model = args.hf_path is not None
     if is_hf_model:
@@ -218,6 +224,7 @@ def main():
     # Results to log
     core_results = None
     bpb_results = {}
+    prompts = []
     samples = []
     unconditioned_samples = []
 
@@ -296,6 +303,24 @@ def main():
                 f.write(f"{'CORE':<35}, {'':<10}, {core_results['core_metric']:<10.6f}\n")
             print0(f"\nResults written to: {output_csv_path}")
             print0(f"CORE metric: {core_results['core_metric']:.4f}")
+
+    # Log evaluation results (and a samples table) to wandb
+    log_data = {}
+    if core_results is not None:
+        log_data["eval/core_metric"] = core_results["core_metric"]
+        for label, acc in core_results["results"].items():
+            log_data[f"eval/core/{label}"] = acc
+    for split_name, bpb in bpb_results.items():
+        log_data[f"eval/bpb_{split_name}"] = bpb
+    if log_data:
+        wandb_run.log(log_data)
+    # Table of the conditioned samples (input prompt -> model output)
+    if samples and not use_dummy_wandb:
+        sample_table = wandb.Table(columns=["prompt", "output"])
+        for prompt, output in zip(prompts, samples):
+            sample_table.add_data(prompt, output)
+        wandb_run.log({"samples/conditioned": sample_table})
+    wandb_run.finish()
 
     compute_cleanup()
 

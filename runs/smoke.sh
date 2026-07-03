@@ -43,7 +43,7 @@ torchrun --standalone --nproc_per_node=$NPROC -m scripts.base_train -- \
 # -----------------------------------------------------------------------------
 # Base eval (CORE / BPB / sample) — only a few examples per task.
 torchrun --standalone --nproc_per_node=$NPROC -m scripts.base_eval -- \
-  --max-per-task=4 --split-tokens=16384 --device-batch-size=8
+  --max-per-task=4 --split-tokens=16384 --device-batch-size=8 --run=$WANDB_RUN
 
 # -----------------------------------------------------------------------------
 # SFT — teach chat special tokens etc. Small identity dataset + few steps.
@@ -56,6 +56,6 @@ torchrun --standalone --nproc_per_node=$NPROC -m scripts.chat_sft -- \
 # -----------------------------------------------------------------------------
 # Chat eval on the SFT model — only a few problems per task.
 torchrun --standalone --nproc_per_node=$NPROC -m scripts.chat_eval -- \
-  -i sft --max-problems=4
+  -i sft --max-problems=4 --run=$WANDB_RUN
 
 echo "✅ Smoke test complete: full pipeline ran end-to-end."

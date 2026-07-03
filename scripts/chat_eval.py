@@ -8,12 +8,14 @@ python -m scripts.chat_eval -a ARC-Easy
 torchrun --nproc_per_node=8 -m scripts.chat_eval -- -a ARC-Easy
 """
 
+import os
 import argparse
 from functools import partial
 import torch
 import torch.distributed as dist
+import wandb
 
-from nanochat.common import compute_init, compute_cleanup, get_dist_info, print0, autodetect_device_type
+from nanochat.common import compute_init, compute_cleanup, get_dist_info, print0, autodetect_device_type, DummyWandb
 from nanochat.checkpoint_manager import load_model
 from nanochat.engine import Engine
 
@@ -26,7 +28,7 @@ from tasks.spellingbee import SpellingBee
 # -----------------------------------------------------------------------------
 # Generative evaluation loop (we go one problem at a time, sample, evaluate)
 
-def run_generative_eval(task_object, tokenizer, model, engine, num_samples, max_new_tokens, temperature, top_k, max_problems=None):
+def run_generative_eval(task_object, tokenizer, model, engine, num_samples, max_new_tokens, temperature, top_k, max_problems=None, collect_rows=None):
 
     ddp, ddp_rank, ddp_local_rank, ddp_world_size = get_dist_info()
     device = model.get_device()
@@ -54,6 +56,12 @@ def run_generative_eval(task_object, tokenizer, model, engine, num_samples, max_
         # Evaluate success criteria
         outcomes = [task_object.evaluate(conversation, completion) for completion in completions]
         passed = any(outcomes)
+
+        # Optionally collect per-sample rows for a wandb.Table (rank 0 only)
+        if collect_rows is not None and ddp_rank == 0:
+            input_str = tokenizer.decode(encoded_prompt)
+            output_str = completions[0] if completions else ""
+            collect_rows.append([input_str, output_str, int(passed)])
 
         # Keep stats
         total += 1
@@ -85,7 +93,7 @@ def run_generative_eval(task_object, tokenizer, model, engine, num_samples, max_
 # A lot easier because we don't have to sample. Therefore, we can actually go
 # batches at a time and just check the logits for correct answer choices.
 
-def run_categorical_eval(task_object, tokenizer, model, batch_size, max_problems=None):
+def run_categorical_eval(task_object, tokenizer, model, batch_size, max_problems=None, collect_rows=None):
 
     ddp, ddp_rank, ddp_local_rank, ddp_world_size = get_dist_info()
     device = model.get_device()
@@ -136,6 +144,11 @@ def run_categorical_eval(task_object, tokenizer, model, batch_size, max_problems
             predicted_letter = letters[argmax_letter_id]
             # evaluate the outcome
             outcome = task_object.evaluate(conversation, predicted_letter)
+            # Optionally collect per-sample rows for a wandb.Table (rank 0 only)
+            if collect_rows is not None and ddp_rank == 0:
+                real_len = answer_pos + 1
+                input_str = tokenizer.decode(padded_prompt_ids[idx][:real_len])
+                collect_rows.append([input_str, predicted_letter, int(outcome)])
             num_passed += int(outcome)
             total += 1
 
@@ -156,7 +169,7 @@ def run_categorical_eval(task_object, tokenizer, model, batch_size, max_problems
 
 def run_chat_eval(task_name, model, tokenizer, engine,
                    batch_size=1, num_samples=1, max_new_tokens=512, temperature=0.0, top_k=50,
-                   max_problems=None):
+                   max_problems=None, collect_rows=None):
     # Create the evaluation object
     task_module = {
         'HumanEval': HumanEval,
@@ -167,13 +180,19 @@ def run_chat_eval(task_name, model, tokenizer, engine,
         'SpellingBee': partial(SpellingBee, size=256, split="test"),
     }[task_name]
     task_object = task_module()
+    # Per-task rows for the wandb.Table (only when the caller wants them)
+    task_rows = [] if collect_rows is not None else None
     # Run the evaluation
     if task_object.eval_type == 'generative':
-        acc = run_generative_eval(task_object, tokenizer, model, engine, num_samples, max_new_tokens, temperature, top_k, max_problems=max_problems)
+        acc = run_generative_eval(task_object, tokenizer, model, engine, num_samples, max_new_tokens, temperature, top_k, max_problems=max_problems, collect_rows=task_rows)
     elif task_object.eval_type == 'categorical':
-        acc = run_categorical_eval(task_object, tokenizer, model, batch_size, max_problems=max_problems)
+        acc = run_categorical_eval(task_object, tokenizer, model, batch_size, max_problems=max_problems, collect_rows=task_rows)
     else:
         raise ValueError(f"Unsupported task evaluation type: {task_object.eval_type}")
+    # Tag each collected row with the task name and hand back to the caller
+    if collect_rows is not None:
+        for row in task_rows:
+            collect_rows.append([task_name] + row)
     return acc
 
 # -----------------------------------------------------------------------------
@@ -192,10 +211,17 @@ if __name__ == "__main__":
     parser.add_argument('-s', '--step', type=int, default=None, help='Step to load')
     parser.add_argument('-x', '--max-problems', type=int, default=None, help='Max problems to evaluate')
     parser.add_argument('--device-type', type=str, default='', choices=['cuda', 'cpu', 'mps'], help='Device type for evaluation: cuda|cpu|mps. empty => autodetect')
+    parser.add_argument('--run', type=str, default='dummy', help="wandb run name ('dummy' disables wandb logging)")
     args = parser.parse_args()
 
     device_type = autodetect_device_type() if args.device_type == "" else args.device_type
     ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
+
+    # wandb logging (only on the master process; "dummy" disables logging)
+    use_dummy_wandb = args.run == "dummy" or ddp_rank != 0
+    wandb_project = os.environ.get("WANDB_PROJECT", "nanochat-sft")
+    wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project=wandb_project, name=f"{args.run}-chat-eval")
+    wandb_run.log_code(root=".") # capture full source tree in wandb
 
     model, tokenizer, meta = load_model(args.source, device, phase="eval", model_tag=args.model_tag, step=args.step)
     engine = Engine(model, tokenizer)
@@ -214,6 +240,7 @@ if __name__ == "__main__":
 
     # Run all the task evaluations sequentially
     results = {}
+    table_rows = [] if not use_dummy_wandb else None # per-sample rows for the wandb.Table
     for task_name in task_names:
         acc = run_chat_eval(
             task_name,
@@ -224,6 +251,7 @@ if __name__ == "__main__":
             temperature=args.temperature,
             top_k=args.top_k,
             max_problems=args.max_problems,
+            collect_rows=table_rows,
         )
         results[task_name] = acc
         print0(f"{task_name} accuracy: {100 * acc:.2f}%")
@@ -231,6 +259,7 @@ if __name__ == "__main__":
     # calculate the ChatCORE metric if we can (similar to CORE, it's the mean centered accuracy)
     # this way, ChatCORE ranges from 0 (at random baseline) to 1 (peak performance)
     all_tasks_were_evaluated = all(task_name in results for task_name in all_tasks)
+    chatcore_metric = None
     if all_tasks_were_evaluated:
         centered_mean = 0
         for task_name, acc in results.items():
@@ -239,5 +268,16 @@ if __name__ == "__main__":
             centered_mean += centered_acc
         chatcore_metric = centered_mean / len(results)
         print0(f"ChatCORE metric: {chatcore_metric:.4f}")
+
+    # Log metrics and a per-sample table (input / output / eval outcome) to wandb
+    log_data = {f"eval/{task_name}": acc for task_name, acc in results.items()}
+    if chatcore_metric is not None:
+        log_data["eval/chatcore_metric"] = chatcore_metric
+    if log_data:
+        wandb_run.log(log_data)
+    if table_rows:
+        eval_table = wandb.Table(columns=["task", "input", "output", "passed"], data=table_rows)
+        wandb_run.log({"eval/samples": eval_table})
+    wandb_run.finish()
 
     compute_cleanup()

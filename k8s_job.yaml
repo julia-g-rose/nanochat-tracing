@@ -18,10 +18,13 @@ spec:
                 secretKeyRef:
                   name: wandb-secrets
                   key: WANDB_API_KEY
-            # Optional: log under a specific entity (team/user). base_train hardcodes
-            # the project to "nanochat"; WANDB_PROJECT is not read by it.
+            # Log under a specific entity (team/user).
             - name: WANDB_ENTITY
               value: "wandb"
+            # All stages (base_train, chat_sft, base_eval, chat_eval) read
+            # WANDB_PROJECT, so everything lands in one project.
+            - name: WANDB_PROJECT
+              value: "nanochat-with-aria"
             # Run name used by every stage. Set to a real name so it logs to wandb;
             # use "dummy" to disable wandb logging.
             - name: WANDB_RUN
