@@ -326,7 +326,7 @@ def main():
     # Filter/group by the "task" column in wandb to inspect any single dataset.
     if core_sample_rows and not use_dummy_wandb:
         core_table = wandb.Table(columns=["task", "input", "predicted", "gold", "correct"], data=core_sample_rows)
-        wandb_run.log({"eval/core_samples": core_table})
+        wandb_run.log({"samples/core": core_table})
     wandb_run.finish()
 
     compute_cleanup()

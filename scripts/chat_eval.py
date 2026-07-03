@@ -303,7 +303,7 @@ if __name__ == "__main__":
                 columns=["task", "input", "output", "ground_truth", "correct"],
                 data=all_rows,
             )
-            wandb_run.log({"eval/samples": eval_table})
+            wandb_run.log({"samples/chat": eval_table})
     wandb_run.finish()
 
     compute_cleanup()
