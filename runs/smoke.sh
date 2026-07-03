@@ -41,9 +41,10 @@ torchrun --standalone --nproc_per_node=$NPROC -m scripts.base_train -- \
   --sample-every=-1 --eval-tokens=4096 --run=$WANDB_RUN
 
 # -----------------------------------------------------------------------------
-# Base eval (CORE / BPB / sample) — only a few examples per task.
+# Base eval (CORE / BPB / sample). CORE tasks are few-shot (up to ~10-shot),
+# so max-per-task must stay above the few-shot count or rng.sample() fails.
 torchrun --standalone --nproc_per_node=$NPROC -m scripts.base_eval -- \
-  --max-per-task=4 --split-tokens=16384 --device-batch-size=8 --run=$WANDB_RUN
+  --max-per-task=32 --split-tokens=16384 --device-batch-size=8 --run=$WANDB_RUN
 
 # -----------------------------------------------------------------------------
 # SFT — teach chat special tokens etc. Small identity dataset + few steps.
