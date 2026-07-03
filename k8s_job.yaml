@@ -22,7 +22,7 @@ spec:
                 secretKeyRef:
                   name: wandb-secrets
                   key: WANDB_API_KEY
-            # Log under a specific entity (team/user).
+            # Log under the "wandb" team entity.
             - name: WANDB_ENTITY
               value: "wandb"
             # All stages (base_train, chat_sft, base_eval, chat_eval) read
