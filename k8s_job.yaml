@@ -1,7 +1,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  generateName: julia-nanochat-short-
+  generateName: julia-nanochat-smoke-
 spec:
   ttlSecondsAfterFinished: 86400 # auto-garbage-collect after 24 h
   template:
@@ -22,19 +22,14 @@ spec:
             # the project to "nanochat"; WANDB_PROJECT is not read by it.
             - name: WANDB_ENTITY
               value: "wandb"
+            # Run name used by every stage. Set to a real name so it logs to wandb;
+            # use "dummy" to disable wandb logging.
+            - name: WANDB_RUN
+              value: "nanochat-smoke"
           resources:
             limits:
               nvidia.com/gpu: 8 # full 8XH100 node
-          # Short smoke-test run. base_train needs a tokenizer + dataset shards on
-          # disk first, which the full speedrun.sh normally prepares. This command
-          # does the minimum prep (download 8 shards -> train tokenizer) and then
-          # runs a tiny 100-iteration pretrain so we can validate the whole path.
-          command:
-            - "bash"
-            - "-lc"
-            - >-
-              python -m nanochat.dataset -n 8 &&
-              python -m scripts.tok_train &&
-              python -m scripts.tok_eval &&
-              torchrun --standalone --nproc_per_node=8 -m scripts.base_train --
-              --depth=20 --num-iterations=100 --run=nanochat-short-base
+          # Full pipeline end-to-end (tokenizer -> pretrain -> base eval -> SFT ->
+          # chat eval) but with tiny settings so it finishes in minutes. This is a
+          # smoke test of the whole path, not a real training run. See runs/smoke.sh.
+          command: ["bash", "runs/smoke.sh"]
