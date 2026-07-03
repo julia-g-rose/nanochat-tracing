@@ -105,10 +105,11 @@ def place_eval_bundle(file_path):
     print0(f"Placed eval_bundle directory at {eval_bundle_dir}")
 
 
-def evaluate_core(model, tokenizer, device, max_per_task=-1):
+def evaluate_core(model, tokenizer, device, max_per_task=-1, collect_rows=None):
     """
     Evaluate a base model on the CORE benchmark.
     Returns dict with results, centered_results, and core_metric.
+    If collect_rows is a list, per-example sample rows (MC/schema) are gathered into it.
     """
     base_dir = get_base_dir()
     eval_bundle_dir = os.path.join(base_dir, "eval_bundle")
@@ -157,7 +158,7 @@ def evaluate_core(model, tokenizer, device, max_per_task=-1):
         if max_per_task > 0:
             data = data[:max_per_task]
 
-        accuracy = evaluate_task(model, tokenizer, data, device, task_meta)
+        accuracy = evaluate_task(model, tokenizer, data, device, task_meta, collect_rows=collect_rows, task_label=label)
         results[label] = accuracy
         random_baseline = random_baselines[label]
         centered_result = (accuracy - 0.01 * random_baseline) / (1.0 - 0.01 * random_baseline)
@@ -223,6 +224,7 @@ def main():
 
     # Results to log
     core_results = None
+    core_sample_rows = []  # per-example CORE rows (MC/schema) for a wandb.Table
     bpb_results = {}
     prompts = []
     samples = []
@@ -287,7 +289,7 @@ def main():
         print0("\n" + "="*80)
         print0("CORE Evaluation")
         print0("="*80)
-        core_results = evaluate_core(model, tokenizer, device, max_per_task=args.max_per_task)
+        core_results = evaluate_core(model, tokenizer, device, max_per_task=args.max_per_task, collect_rows=core_sample_rows)
 
         # Write CSV output
         if ddp_rank == 0:
@@ -320,6 +322,11 @@ def main():
         for prompt, output in zip(prompts, samples):
             sample_table.add_data(prompt, output)
         wandb_run.log({"samples/conditioned": sample_table})
+    # Table of CORE per-example predictions (MC/schema; sampled + gathered across ranks).
+    # Filter/group by the "task" column in wandb to inspect any single dataset.
+    if core_sample_rows and not use_dummy_wandb:
+        core_table = wandb.Table(columns=["task", "input", "predicted", "gold", "correct"], data=core_sample_rows)
+        wandb_run.log({"eval/core_samples": core_table})
     wandb_run.finish()
 
     compute_cleanup()
