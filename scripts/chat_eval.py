@@ -220,7 +220,7 @@ if __name__ == "__main__":
     # wandb logging (only on the master process; "dummy" disables logging)
     use_dummy_wandb = args.run == "dummy" or ddp_rank != 0
     wandb_project = os.environ.get("WANDB_PROJECT", "nanochat-sft")
-    wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project=wandb_project, name=f"{args.run}-chat-eval")
+    wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project=wandb_project, name=f"{args.run}-chat-eval", config=vars(args))
     wandb_run.log_code(root=".") # capture full source tree in wandb
 
     model, tokenizer, meta = load_model(args.source, device, phase="eval", model_tag=args.model_tag, step=args.step)

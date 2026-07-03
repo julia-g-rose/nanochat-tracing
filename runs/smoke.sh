@@ -38,7 +38,7 @@ python -m scripts.tok_eval
 torchrun --standalone --nproc_per_node=$NPROC -m scripts.base_train -- \
   --depth=4 --max-seq-len=512 --device-batch-size=1 --total-batch-size=4096 \
   --num-iterations=30 --eval-every=-1 --core-metric-every=-1 \
-  --sample-every=-1 --eval-tokens=4096 --run=$WANDB_RUN
+  --sample-every=-1 --eval-tokens=4096 --grad-metrics-every=5 --run=$WANDB_RUN
 
 # -----------------------------------------------------------------------------
 # Base eval. We run only BPB + sampling in the smoke test: CORE tasks are

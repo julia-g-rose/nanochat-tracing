@@ -17,6 +17,7 @@ import gc
 import json
 import time
 import math
+import re
 import argparse
 from dataclasses import asdict
 from contextlib import contextmanager
@@ -32,6 +33,32 @@ from nanochat.tokenizer import get_tokenizer, get_token_bytes
 from nanochat.checkpoint_manager import save_checkpoint, load_checkpoint
 from nanochat.loss_eval import evaluate_bpb
 from nanochat.engine import Engine
+
+# Per-layer training-signal metrics for wandb. Params are grouped by transformer
+# block index (transformer.h.<i>); embeddings / lm_head bucket to "embed_head".
+_LAYER_RE = re.compile(r"transformer\.h\.(\d+)\.")
+def compute_layer_metrics(model):
+    """Return per-layer grad/param L2 norms + global grad norm.
+    Uses the current (DDP-synced) gradients; minimal CPU-GPU syncs (one per group)."""
+    grad_sq, param_sq = {}, {}
+    for name, p in model.named_parameters():
+        if p.grad is None:
+            continue
+        m = _LAYER_RE.search(name)
+        key = int(m.group(1)) if m else -1  # -1 = non-block params (embeddings/head)
+        gs = p.grad.detach().float().pow(2).sum()
+        ps = p.detach().float().pow(2).sum()
+        grad_sq[key] = gs if key not in grad_sq else grad_sq[key] + gs
+        param_sq[key] = ps if key not in param_sq else param_sq[key] + ps
+    metrics, global_sq = {}, None
+    for key in sorted(grad_sq):
+        label = "embed_head" if key == -1 else f"layer_{key:02d}"
+        metrics[f"grad_norm/{label}"] = grad_sq[key].sqrt().item()
+        metrics[f"param_norm/{label}"] = param_sq[key].sqrt().item()
+        global_sq = grad_sq[key] if global_sq is None else global_sq + grad_sq[key]
+    if global_sq is not None:
+        metrics["grad_norm/global"] = global_sq.sqrt().item()
+    return metrics
 from nanochat.flash_attention import HAS_FA3
 from scripts.base_eval import evaluate_core
 print_banner()
@@ -77,6 +104,7 @@ parser.add_argument("--sample-every", type=int, default=2000, help="sample from 
 parser.add_argument("--save-every", type=int, default=-1, help="save checkpoints every N steps (-1 = only at end)")
 # Output
 parser.add_argument("--model-tag", type=str, default=None, help="override model tag for checkpoint directory name")
+parser.add_argument("--grad-metrics-every", type=int, default=100, help="log per-layer grad/param L2 norms every N steps (-1 = disable)")
 args = parser.parse_args()
 user_config = vars(args).copy()  # for logging
 # -----------------------------------------------------------------------------
@@ -413,6 +441,19 @@ print0(f"Tokens / micro-batch / rank: {args.device_batch_size} x {args.max_seq_l
 print0(f"Tokens / micro-batch: {world_tokens_per_fwdbwd:,}")
 print0(f"Total batch size {total_batch_size:,} => gradient accumulation steps: {grad_accum_steps}")
 
+# Enrich the wandb config with resolved/derived values (not just the raw CLI args)
+if not use_dummy_wandb:
+    wandb_run.config.update({
+        "resolved_num_iterations": num_iterations,
+        "resolved_total_batch_size": total_batch_size,
+        "grad_accum_steps": grad_accum_steps,
+        "num_params": num_params,
+        "num_scaling_params": num_scaling_params,
+        "ddp_world_size": ddp_world_size,
+        "compute_dtype": str(COMPUTE_DTYPE),
+        "model_config": model_config_kwargs,
+    }, allow_val_change=True)
+
 # Go!
 while True:
     last_step = step == num_iterations # loop runs num_iterations+1 times so that we can eval/save at the end
@@ -544,6 +585,10 @@ while True:
         scaler.update()
     else:
         optimizer.step()
+    # Per-layer training-signal metrics (computed while grads are still live, i.e.
+    # after any fp8 unscale and before zero_grad).
+    if args.grad_metrics_every > 0 and not use_dummy_wandb and step % args.grad_metrics_every == 0:
+        wandb_run.log({"step": step, **compute_layer_metrics(orig_model)})
     model.zero_grad(set_to_none=True)
     train_loss_f = train_loss.item() # .item() is a CPU-GPU sync point
     synchronize()
