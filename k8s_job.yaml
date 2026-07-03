@@ -26,6 +26,11 @@ spec:
             # use "dummy" to disable wandb logging.
             - name: WANDB_RUN
               value: "nanochat-smoke"
+            # Capture code: saves the entry script and records git SHA + diff
+            # (the image ships with .git). NOTE: also requires code saving to be
+            # enabled at the wandb org + team level, or it's silently skipped.
+            - name: WANDB_SAVE_CODE
+              value: "true"
           resources:
             limits:
               nvidia.com/gpu: 8 # full 8XH100 node
