@@ -9,7 +9,7 @@ spec:
       restartPolicy: Never
       containers:
         - name: nanochat-train
-          image: juliarose/nanochat:short-run
+          image: juliarosewandb/nanochat:short-run
           imagePullPolicy: Always
           env:
             # Required for wandb logging. Stored as a k8s secret (see README).
