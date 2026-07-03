@@ -28,6 +28,12 @@ COPY . .
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --extra gpu --frozen
 
+# torchao is required for --fp8 training (runs/speedrun.sh uses --fp8 at d24) but
+# is not in the locked deps. Install it as a separate layer so the large
+# locked-deps layer above stays cached and does not need re-pushing.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --python /opt/venv/bin/python torchao
+
 # Put the venv on PATH so `python` / `torchrun` resolve without activation.
 ENV PATH="/opt/venv/bin:$PATH" \
     PYTHONUNBUFFERED=1
