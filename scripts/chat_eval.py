@@ -25,6 +25,16 @@ from tasks.arc import ARC
 from tasks.gsm8k import GSM8K
 from tasks.spellingbee import SpellingBee
 
+def _content_text(content):
+    """Stringify a message 'content', which is either a str or a list of parts."""
+    if isinstance(content, str):
+        return content
+    return "".join(str(p.get("text", "")) if isinstance(p, dict) else str(p) for p in content)
+
+def _ground_truth_text(conversation):
+    """Reference answer for a task example (the last / assistant message)."""
+    return _content_text(conversation["messages"][-1]["content"])
+
 # -----------------------------------------------------------------------------
 # Generative evaluation loop (we go one problem at a time, sample, evaluate)
 
@@ -58,10 +68,11 @@ def run_generative_eval(task_object, tokenizer, model, engine, num_samples, max_
         passed = any(outcomes)
 
         # Optionally collect per-sample rows for a wandb.Table (rank 0 only)
-        if collect_rows is not None and ddp_rank == 0:
-            input_str = tokenizer.decode(encoded_prompt)
+        if collect_rows is not None:
+            # Collect on every rank (each rank evals a shard); gathered later.
+            input_str = _content_text(conversation["messages"][0]["content"])
             output_str = completions[0] if completions else ""
-            collect_rows.append([input_str, output_str, int(passed)])
+            collect_rows.append([input_str, output_str, _ground_truth_text(conversation), int(passed)])
 
         # Keep stats
         total += 1
@@ -145,10 +156,11 @@ def run_categorical_eval(task_object, tokenizer, model, batch_size, max_problems
             # evaluate the outcome
             outcome = task_object.evaluate(conversation, predicted_letter)
             # Optionally collect per-sample rows for a wandb.Table (rank 0 only)
-            if collect_rows is not None and ddp_rank == 0:
-                real_len = answer_pos + 1
-                input_str = tokenizer.decode(padded_prompt_ids[idx][:real_len])
-                collect_rows.append([input_str, predicted_letter, int(outcome)])
+            if collect_rows is not None:
+                # Collect on every rank (each rank evals a shard); gathered later.
+                input_str = _content_text(conversation["messages"][0]["content"])
+                ground_truth = conversation["messages"][-1]["content"]  # correct letter
+                collect_rows.append([input_str, predicted_letter, ground_truth, int(outcome)])
             num_passed += int(outcome)
             total += 1
 
@@ -240,7 +252,10 @@ if __name__ == "__main__":
 
     # Run all the task evaluations sequentially
     results = {}
-    table_rows = [] if not use_dummy_wandb else None # per-sample rows for the wandb.Table
+    # Collect per-sample rows on EVERY rank (each rank evaluates a shard of each
+    # task); gathered to rank 0 below for one combined table. "dummy" => skip.
+    want_table = args.run != "dummy"
+    table_rows = [] if want_table else None
     for task_name in task_names:
         acc = run_chat_eval(
             task_name,
@@ -275,9 +290,20 @@ if __name__ == "__main__":
         log_data["eval/chatcore_metric"] = chatcore_metric
     if log_data:
         wandb_run.log(log_data)
-    if table_rows:
-        eval_table = wandb.Table(columns=["task", "input", "output", "passed"], data=table_rows)
-        wandb_run.log({"eval/samples": eval_table})
+    # Gather per-rank rows to rank 0 and log one combined per-sample table.
+    if want_table:
+        if ddp:
+            gathered = [None] * ddp_world_size
+            dist.all_gather_object(gathered, table_rows)
+            all_rows = [row for part in gathered if part for row in part]
+        else:
+            all_rows = table_rows
+        if not use_dummy_wandb and all_rows:
+            eval_table = wandb.Table(
+                columns=["task", "input", "output", "ground_truth", "correct"],
+                data=all_rows,
+            )
+            wandb_run.log({"eval/samples": eval_table})
     wandb_run.finish()
 
     compute_cleanup()

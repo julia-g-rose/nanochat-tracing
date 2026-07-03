@@ -58,7 +58,8 @@ torchrun --standalone --nproc_per_node=$NPROC -m scripts.chat_sft -- \
 
 # -----------------------------------------------------------------------------
 # Chat eval on the SFT model — only a few problems per task.
+# --max-problems=16 (x6 tasks, gathered across ranks) gives a richer eval table.
 torchrun --standalone --nproc_per_node=$NPROC -m scripts.chat_eval -- \
-  -i sft --max-problems=4 --run=$WANDB_RUN
+  -i sft --max-problems=16 --run=$WANDB_RUN
 
 echo "✅ Smoke test complete: full pipeline ran end-to-end."
