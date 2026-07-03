@@ -7,6 +7,8 @@ eval_bundle/
 
 # Secrets
 .env
+wandb.env
+CWKubeconfig_cks-wb3
 
 # Local setup
 CLAUDE.md

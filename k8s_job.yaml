@@ -1,0 +1,40 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  generateName: julia-nanochat-short-
+spec:
+  ttlSecondsAfterFinished: 86400 # auto-garbage-collect after 24 h
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: nanochat-train
+          image: juliarose/nanochat:short-run
+          imagePullPolicy: Always
+          env:
+            # Required for wandb logging. Stored as a k8s secret (see README).
+            - name: WANDB_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: wandb-secrets
+                  key: WANDB_API_KEY
+            # Optional: log under a specific entity (team/user). base_train hardcodes
+            # the project to "nanochat"; WANDB_PROJECT is not read by it.
+            - name: WANDB_ENTITY
+              value: "wandb"
+          resources:
+            limits:
+              nvidia.com/gpu: 8 # full 8XH100 node
+          # Short smoke-test run. base_train needs a tokenizer + dataset shards on
+          # disk first, which the full speedrun.sh normally prepares. This command
+          # does the minimum prep (download 8 shards -> train tokenizer) and then
+          # runs a tiny 100-iteration pretrain so we can validate the whole path.
+          command:
+            - "bash"
+            - "-lc"
+            - >-
+              python -m nanochat.dataset -n 8 &&
+              python -m scripts.tok_train &&
+              python -m scripts.tok_eval &&
+              torchrun --standalone --nproc_per_node=8 -m scripts.base_train --
+              --depth=20 --num-iterations=100 --run=nanochat-short-base
