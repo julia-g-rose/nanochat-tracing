@@ -104,7 +104,7 @@ parent_step = meta.get("step", 0)
 if parent_run_id and not use_dummy_wandb:
     fork_kwargs["fork_from"] = f"{parent_run_id}?_step={parent_step}"
     wandb_step_offset = parent_step
-print0(f"[fork-debug] parent_run_id={parent_run_id!r} parent_step={parent_step} use_dummy_wandb={use_dummy_wandb} fork_from={fork_kwargs.get('fork_from')} offset={wandb_step_offset}")
+    print0(f"Forking SFT wandb run from base_train run '{parent_run_id}' at step {parent_step}")
 wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(
     project=os.environ.get("WANDB_PROJECT", "nanochat-sft"),
     name=f"{args.run}-sft", config=user_config, group=args.run, job_type="sft", **fork_kwargs)
