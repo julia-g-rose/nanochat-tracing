@@ -14,7 +14,7 @@ spec:
       containers:
         - name: nanochat-train
           # Same digest-pinned image as the smoke job (contains runs/full.sh + torchao).
-          image: juliarosewandb/nanochat@sha256:6b574a10c8c31faabaa89c8b993c70a27a3da3120b7d76fe50c30fbf1133d60c
+          image: juliarosewandb/nanochat@sha256:88eebf0c579a5c6a236166fe116d0eb1219db8d2a81bd19a7ddbbf34a586dd7b
           imagePullPolicy: Always
           env:
             - name: WANDB_API_KEY
