@@ -1,5 +1,5 @@
 """
-Train a tokenizer using the HuggingFace Tokenizers library.
+Train a tokenizer using our own BPE Tokenizer library.
 In the style of GPT-4 tokenizer.
 """
 import os
@@ -14,9 +14,9 @@ from nanochat.dataset import parquets_iter_batched
 # Parse command line arguments
 
 parser = argparse.ArgumentParser(description='Train a BPE tokenizer')
-parser.add_argument('--max_chars', type=int, default=10_000_000_000, help='Maximum characters to train on (default: 10B)')
-parser.add_argument('--doc_cap', type=int, default=10_000, help='Maximum characters per document (default: 10,000)')
-parser.add_argument('--vocab_size', type=int, default=65536, help='Vocabulary size (default: 65536 = 2^16)')
+parser.add_argument('--max-chars', type=int, default=2_000_000_000, help='Maximum characters to train on (default: 2B)')
+parser.add_argument('--doc-cap', type=int, default=10_000, help='Maximum characters per document (default: 10,000)')
+parser.add_argument('--vocab-size', type=int, default=32768, help='Vocabulary size (default: 32768 = 2^15)')
 args = parser.parse_args()
 print(f"max_chars: {args.max_chars:,}")
 print(f"doc_cap: {args.doc_cap:,}")
@@ -89,18 +89,3 @@ token_bytes_path = os.path.join(tokenizer_dir, "token_bytes.pt")
 with open(token_bytes_path, "wb") as f:
     torch.save(token_bytes, f)
 print(f"Saved token_bytes to {token_bytes_path}")
-
-# Log to report
-from nanochat.report import get_report
-token_bytes_nonzero = (token_bytes[token_bytes > 0]).to(dtype=torch.float32)
-get_report().log(section="Tokenizer training", data=[
-    vars(args), # argparse command line arguments
-    {"train_time": train_time},
-    {"num_special_tokens": len(special_set)},
-    {
-        "token_bytes_min": int(token_bytes_nonzero.min().item()),
-        "token_bytes_max": int(token_bytes_nonzero.max().item()),
-        "token_bytes_mean": token_bytes_nonzero.mean().item(),
-        "token_bytes_std": token_bytes_nonzero.std().item(),
-    }
-])

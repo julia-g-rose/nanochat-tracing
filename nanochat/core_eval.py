@@ -10,7 +10,6 @@ import random
 from jinja2 import Template
 import torch
 import torch.distributed as dist
-import weave
 
 # -----------------------------------------------------------------------------
 # Prompt rendering utilities
@@ -165,22 +164,25 @@ def forward_model(model, input_ids):
     return losses, predictions
 
 
-@weave.op()
 @torch.no_grad()
-def evaluate_example(idx, model, tokenizer, data, device, task_meta):
-    """Evaluate a single example, return True if correct, False otherwise"""
+def evaluate_example(idx, model, tokenizer, data, device, task_meta, collect_rows=None, task_label=None):
+    """Evaluate a single example, return True if correct, False otherwise.
+    If collect_rows is a list, append a per-example row (MC/schema only) for a wandb.Table."""
     item = data[idx]
     task_type = task_meta['task_type']
     num_fewshot = task_meta['num_fewshot']
     continuation_delimiter = task_meta['continuation_delimiter']
-    trace_payload: dict = {"task_type": task_type, "num_fewshot": num_fewshot}
 
     # Sample few-shot examples (excluding current item)
     fewshot_examples = []
     if num_fewshot > 0:
         rng = random.Random(1234 + idx)
         available_indices = [i for i in range(len(data)) if i != idx]
-        fewshot_indices = rng.sample(available_indices, num_fewshot)
+        # Cap to the available pool so aggressive subsampling (small max_per_task)
+        # degrades gracefully to fewer-shot instead of crashing rng.sample().
+        # No-op in a normal run where the pool is far larger than num_fewshot.
+        k = min(num_fewshot, len(available_indices))
+        fewshot_indices = rng.sample(available_indices, k)
         fewshot_examples = [data[i] for i in fewshot_indices]
 
     # Render prompts and batch sequences based on task type
@@ -232,58 +234,57 @@ def evaluate_example(idx, model, tokenizer, data, device, task_meta):
         predicted_tokens = predictions[0, si-1:ei-1]
         actual_tokens = input_ids[0, si:ei]
         is_correct = torch.all(predicted_tokens == actual_tokens).item()
-        trace_payload.update({
-            "predicted_continuation": tokenizer.decode(predicted_tokens.cpu().tolist()),
-            "actual_continuation": tokenizer.decode(actual_tokens.cpu().tolist()),
-            "model_input": tokenizer.decode(tokens[0][:start_idxs[0]]) if tokens else "",
-        })
     elif task_type in ['multiple_choice', 'schema']:
         # For MC/schema: find the option with lowest average loss
         mean_losses = [losses[i, si-1:ei-1].mean().item()
                         for i, (si, ei) in enumerate(zip(start_idxs, end_idxs))]
         pred_idx = mean_losses.index(min(mean_losses))
         is_correct = pred_idx == item['gold']
-        trace_payload.update({
-            "predicted_idx": pred_idx,
-            "gold_idx": item.get("gold"),
-            "prompt": prompts[0] if prompts else "",
-        })
-        if task_type == 'multiple_choice':
-            choices = item.get("choices", [])
-            trace_payload.update({
-                "choices": choices,
-                "predicted_choice": choices[pred_idx] if pred_idx < len(choices) else "unknown",
-                "correct_choice": choices[item['gold']] if item.get("gold", -1) < len(choices) else "unknown",
-            })
-        else:  # schema
-            trace_payload.update({
-                "context_options": item.get("context_options", []),
-                "predicted_context_idx": pred_idx,
-                "gold_context_idx": item.get("gold"),
-            })
     else:
         raise ValueError(f"Unsupported task type: {task_type}")
 
-    trace_payload["is_correct"] = bool(is_correct)
-    return trace_payload
+    # Optionally collect a per-example row for a wandb.Table. Only MC/schema fit
+    # the (input, predicted, gold, correct) shape; language_modeling is excluded.
+    if collect_rows is not None and task_type in ('multiple_choice', 'schema'):
+        options = item.get('choices') or item.get('context_options') or []
+        def _opt(i):
+            return options[i] if isinstance(options, list) and 0 <= i < len(options) else str(i)
+        collect_rows.append([task_label, item.get('query', ''), _opt(pred_idx), _opt(item['gold']), int(is_correct)])
+
+    return is_correct
 
 
-def evaluate_task(model, tokenizer, data, device, task_meta):
+def evaluate_task(model, tokenizer, data, device, task_meta, collect_rows=None, task_label=None, max_rows=50):
     """
     This function is responsible for evaluating one task across many examples.
     It also handles dispatch to all processes if the script is run with torchrun.
+    If collect_rows is a list, per-example rows (up to ~max_rows across ranks) are
+    collected and gathered into it for a wandb.Table.
     """
     rank = dist.get_rank() if dist.is_initialized() else 0
     world_size = dist.get_world_size() if dist.is_initialized() else 1
     correct = torch.zeros(len(data), dtype=torch.float32, device=device)
+    rank_rows = [] if collect_rows is not None else None
+    per_rank_cap = max(1, -(-max_rows // world_size)) if collect_rows is not None else 0  # ceil-div
     # stride the examples to each rank
     for idx in range(rank, len(data), world_size):
-        result = evaluate_example(idx, model, tokenizer, data, device, task_meta)
-        correct[idx] = float(result["is_correct"])
+        collect = rank_rows if (rank_rows is not None and len(rank_rows) < per_rank_cap) else None
+        is_correct = evaluate_example(idx, model, tokenizer, data, device, task_meta, collect_rows=collect, task_label=task_label)
+        correct[idx] = float(is_correct)
     # sync results across all the processes if running distributed
     if world_size > 1:
         dist.barrier()
         dist.all_reduce(correct, op=dist.ReduceOp.SUM)
     # compute the mean
     mean_correct = correct.mean().item()
+    # gather the sampled per-example rows to every rank (base_eval logs on rank 0)
+    if rank_rows is not None:
+        if world_size > 1:
+            gathered = [None] * world_size
+            dist.all_gather_object(gathered, rank_rows)
+            for part in gathered:
+                if part:
+                    collect_rows.extend(part)
+        else:
+            collect_rows.extend(rank_rows)
     return mean_correct

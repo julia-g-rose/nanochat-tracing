@@ -1,0 +1,53 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  generateName: julia-nanochat-smoke-
+spec:
+  ttlSecondsAfterFinished: 86400 # auto-garbage-collect after 24 h
+  template:
+    spec:
+      # CoreWeave admission policy requires GPU pods to use the binpack scheduler
+      # and to bound their lifetime (activeDeadlineSeconds <= 604800s / 7 days).
+      schedulerName: binpack-scheduler
+      activeDeadlineSeconds: 86400
+      restartPolicy: Never
+      containers:
+        - name: nanochat-train
+          # Pinned by digest: a mutable tag was serving a stale cached image on
+          # the node (CoreWeave registry cache). Digest refs are immutable, so the
+          # node always gets exactly this content. Re-pin after each rebuild.
+          image: juliarosewandb/nanochat@sha256:88eebf0c579a5c6a236166fe116d0eb1219db8d2a81bd19a7ddbbf34a586dd7b
+          imagePullPolicy: Always
+          env:
+            # Required for wandb logging. Stored as a k8s secret (see README).
+            - name: WANDB_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: wandb-secrets
+                  key: WANDB_API_KEY
+            # Log under the "wandb" team entity.
+            - name: WANDB_ENTITY
+              value: "wandb"
+            # All stages (base_train, chat_sft, base_eval, chat_eval) read
+            # WANDB_PROJECT, so everything lands in one project.
+            - name: WANDB_PROJECT
+              value: "nanochat-with-aria"
+            # Run name used by every stage. Set to a real name so it logs to wandb;
+            # use "dummy" to disable wandb logging.
+            - name: WANDB_RUN
+              value: "nanochat-smoke"
+            # Capture code: saves the entry script and records git SHA + diff
+            # (the image ships with .git). NOTE: also requires code saving to be
+            # enabled at the wandb org + team level, or it's silently skipped.
+            - name: WANDB_SAVE_CODE
+              value: "true"
+            # GPUs for torchrun (must match the nvidia.com/gpu limit below).
+            - name: NPROC_PER_NODE
+              value: "4"
+          resources:
+            limits:
+              nvidia.com/gpu: 4 # smoke test; bump to 8 for a real run when a full node is free
+          # Full pipeline end-to-end (tokenizer -> pretrain -> base eval -> SFT ->
+          # chat eval) but with tiny settings so it finishes in minutes. This is a
+          # smoke test of the whole path, not a real training run. See runs/smoke.sh.
+          command: ["bash", "runs/smoke.sh"]

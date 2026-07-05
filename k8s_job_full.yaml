@@ -1,0 +1,45 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  generateName: julia-nanochat-d12-
+spec:
+  ttlSecondsAfterFinished: 86400 # auto-garbage-collect after 24 h
+  template:
+    spec:
+      # CoreWeave admission policy: GPU pods need the binpack scheduler and a
+      # bounded lifetime (<= 604800s). 4h is ample for a d12 run.
+      schedulerName: binpack-scheduler
+      activeDeadlineSeconds: 14400
+      restartPolicy: Never
+      containers:
+        - name: nanochat-train
+          # Same digest-pinned image as the smoke job (contains runs/full.sh + torchao).
+          image: juliarosewandb/nanochat@sha256:88eebf0c579a5c6a236166fe116d0eb1219db8d2a81bd19a7ddbbf34a586dd7b
+          imagePullPolicy: Always
+          env:
+            - name: WANDB_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: wandb-secrets
+                  key: WANDB_API_KEY
+            - name: WANDB_ENTITY
+              value: "wandb"
+            - name: WANDB_PROJECT
+              value: "nanochat-with-aria"
+            - name: WANDB_RUN
+              value: "nanochat-d12"
+            - name: WANDB_SAVE_CODE
+              value: "true"
+            # Real run, smaller/cheaper scale: depth 12 on 4 GPUs. ~24 shards is
+            # plenty of data for d12's token budget.
+            - name: DEPTH
+              value: "12"
+            - name: NPROC_PER_NODE
+              value: "4"
+            - name: NUM_SHARDS
+              value: "24"
+          resources:
+            limits:
+              nvidia.com/gpu: 4
+          # Full real pipeline (pretrain -> base eval -> SFT -> chat eval) with fp8.
+          command: ["bash", "runs/full.sh"]
