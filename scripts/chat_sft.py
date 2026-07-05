@@ -84,10 +84,9 @@ if device_type == "cuda":
 else:
     gpu_peak_flops = float('inf')  # MFU not meaningful for CPU/MPS
 
-# wandb logging init
+# wandb logging: compute the dummy flag now, but defer wandb.init until after the
+# base checkpoint is loaded, so we can fork the SFT run from the base_train run.
 use_dummy_wandb = args.run == "dummy" or not master_process
-wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project=os.environ.get("WANDB_PROJECT", "nanochat-sft"), name=f"{args.run}-sft", config=user_config)
-wandb_run.log_code(root=".") # capture full source tree in wandb
 
 # Flash Attention status
 if not HAS_FA3:
@@ -95,6 +94,20 @@ if not HAS_FA3:
 
 # Load the model and tokenizer
 model, tokenizer, meta = load_model("base", device, phase="train", model_tag=args.model_tag, step=args.model_step)
+
+# Init wandb, forking from the base_train run recorded in the checkpoint so the
+# SFT run continues the pretraining timeline (its steps are offset to follow on).
+fork_kwargs = {}
+wandb_step_offset = 0
+parent_run_id = meta.get("wandb_run_id")
+parent_step = meta.get("step", 0)
+if parent_run_id and not use_dummy_wandb:
+    fork_kwargs["fork_from"] = f"{parent_run_id}?_step={parent_step}"
+    wandb_step_offset = parent_step
+wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(
+    project=os.environ.get("WANDB_PROJECT", "nanochat-sft"),
+    name=f"{args.run}-sft", config=user_config, group=args.run, job_type="sft", **fork_kwargs)
+wandb_run.log_code(root=".") # capture full source tree in wandb
 
 # Inherit training hyperparameters from pretrained checkpoint (None = inherit, explicit value = override)
 pretrain_user_config = meta.get("user_config", {})
@@ -354,7 +367,7 @@ while True:
         if val_bpb < min_val_bpb:
             min_val_bpb = val_bpb
         wandb_run.log({
-            "step": step,
+            "step": step + wandb_step_offset,
             "total_training_flops": flops_so_far,
             "total_training_time": total_training_time,
             "val/bpb": val_bpb,
@@ -388,7 +401,7 @@ while True:
         chatcore_cat = centered_mean(categorical_tasks)
         print0(f"Step {step:05d} | ChatCORE: {chatcore:.4f} | ChatCORE_cat: {chatcore_cat:.4f}")
         wandb_run.log({
-            "step": step,
+            "step": step + wandb_step_offset,
             "total_training_flops": flops_so_far,
             "chatcore_metric": chatcore,
             "chatcore_cat": chatcore_cat,
@@ -483,7 +496,7 @@ while True:
     print0(f"step {step:05d} ({pct_done:.2f}%) | loss: {debiased_smooth_loss:.6f} | lrm: {lrm:.2f} | dt: {dt * 1000:.2f}ms | tok/sec: {tok_per_sec:,} | mfu: {mfu:.2f} | epoch: {current_epoch} | total time: {total_training_time/60:.2f}m")
     if step % 10 == 0:
         wandb_run.log({
-            "step": step,
+            "step": step + wandb_step_offset,
             "total_training_flops": flops_so_far,
             "total_training_time": total_training_time,
             "train/loss": debiased_smooth_loss,

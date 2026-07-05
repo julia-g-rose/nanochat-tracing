@@ -125,7 +125,7 @@ print0(f"COMPUTE_DTYPE: {COMPUTE_DTYPE} ({COMPUTE_DTYPE_REASON})")
 
 # wandb logging init
 use_dummy_wandb = args.run == "dummy" or not master_process
-wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project=os.environ.get("WANDB_PROJECT", "nanochat"), name=f"{args.run}-base", config=user_config)
+wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project=os.environ.get("WANDB_PROJECT", "nanochat"), name=f"{args.run}-base", config=user_config, group=args.run, job_type="pretrain")
 wandb_run.log_code(root=".") # capture full source tree in wandb
 
 # Flash Attention status
@@ -524,6 +524,7 @@ while True:
             optimizer.state_dict(), # optimizer state
             { # metadata saved as json
                 "step": step,
+                "wandb_run_id": wandb_run.id, # lets chat_sft fork its wandb run from this one
                 "val_bpb": val_bpb, # loss at last step
                 "model_config": model_config_kwargs,
                 "user_config": user_config, # inputs to the training script

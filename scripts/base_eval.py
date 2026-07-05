@@ -202,7 +202,7 @@ def main():
     ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
     # wandb logging (only on the master process; "dummy" disables logging)
     use_dummy_wandb = args.run == "dummy" or ddp_rank != 0
-    wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project=os.environ.get("WANDB_PROJECT", "nanochat"), name=f"{args.run}-base-eval", config=vars(args))
+    wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project=os.environ.get("WANDB_PROJECT", "nanochat"), name=f"{args.run}-base-eval", config=vars(args), group=args.run, job_type="eval")
     wandb_run.log_code(root=".") # capture full source tree in wandb
     # Load model and tokenizer
     is_hf_model = args.hf_path is not None
