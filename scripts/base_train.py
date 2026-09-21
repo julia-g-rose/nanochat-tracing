@@ -59,6 +59,44 @@ def compute_layer_metrics(model):
     if global_sq is not None:
         metrics["grad_norm/global"] = global_sq.sqrt().item()
     return metrics
+
+@torch.no_grad()
+def compute_attention_gate_metrics(model, tokens, max_tokens=128):
+    """Summarize learned SDPA gates on a small, fixed-cost token slice."""
+    gate_logits = {}
+    handles = []
+    for name, module in model.named_modules():
+        if name.endswith(".attn.sdpa_gate"):
+            handles.append(module.register_forward_hook(
+                lambda _module, _inputs, output, name=name: gate_logits.setdefault(name, output.detach())
+            ))
+    was_training = model.training
+    try:
+        model.eval()
+        model(tokens[:1, :max_tokens])
+    finally:
+        for handle in handles:
+            handle.remove()
+        model.train(was_training)
+
+    metrics = {}
+    all_gates = []
+    for name, logits in sorted(gate_logits.items()):
+        layer = int(name.split("transformer.h.", 1)[1].split(".", 1)[0])
+        gates = torch.sigmoid(logits.float()).flatten()
+        metrics[f"attention_gate/layer_{layer:02d}_mean"] = gates.mean().item()
+        all_gates.append(gates)
+    if all_gates:
+        gates = torch.cat(all_gates)
+        quantiles = torch.quantile(gates, torch.tensor([0.1, 0.5, 0.9], device=gates.device))
+        metrics.update({
+            "attention_gate/mean": gates.mean().item(),
+            "attention_gate/std": gates.std().item(),
+            "attention_gate/p10": quantiles[0].item(),
+            "attention_gate/p50": quantiles[1].item(),
+            "attention_gate/p90": quantiles[2].item(),
+        })
+    return metrics
 from nanochat.flash_attention import HAS_FA3
 from scripts.base_eval import evaluate_core
 print_banner()
@@ -444,6 +482,9 @@ print0(f"Total batch size {total_batch_size:,} => gradient accumulation steps: {
 # Enrich the wandb config with resolved/derived values (not just the raw CLI args)
 if not use_dummy_wandb:
     wandb_run.config.update({
+        "architecture_variant": "query_dependent_headwise_sdpa_gate",
+        "architecture_reference": "arxiv:2505.06708",
+        "architecture_base_commit": "bff31a34fcec80d364b5b93027a393ec77b97949",
         "resolved_num_iterations": num_iterations,
         "resolved_total_batch_size": total_batch_size,
         "grad_accum_steps": grad_accum_steps,
@@ -589,7 +630,11 @@ while True:
     # Per-layer training-signal metrics (computed while grads are still live, i.e.
     # after any fp8 unscale and before zero_grad).
     if args.grad_metrics_every > 0 and not use_dummy_wandb and step % args.grad_metrics_every == 0:
-        wandb_run.log({"step": step, **compute_layer_metrics(orig_model)})
+        wandb_run.log({
+            "step": step,
+            **compute_layer_metrics(orig_model),
+            **compute_attention_gate_metrics(orig_model, x),
+        })
     model.zero_grad(set_to_none=True)
     train_loss_f = train_loss.item() # .item() is a CPU-GPU sync point
     synchronize()
