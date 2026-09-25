@@ -14,6 +14,7 @@ from functools import partial
 import torch
 import torch.distributed as dist
 import wandb
+from nanochat.wandb_utils import make_eval_table
 
 from nanochat.common import compute_init, compute_cleanup, get_dist_info, print0, autodetect_device_type, DummyWandb
 from nanochat.checkpoint_manager import load_model
@@ -299,9 +300,15 @@ if __name__ == "__main__":
         else:
             all_rows = table_rows
         if not use_dummy_wandb and all_rows:
-            eval_table = wandb.Table(
-                columns=["task", "input", "output", "ground_truth", "correct"],
-                data=all_rows,
+            # Rows arrive as task, input, output, ground_truth, correct; reorder
+            # them to the EvalTable contract: inputs -> outputs -> scores.
+            typed_rows = [[task, input_text, ground_truth, output, correct]
+                          for task, input_text, output, ground_truth, correct in all_rows]
+            eval_table = make_eval_table(
+                input_columns=["task", "input", "ground_truth"],
+                output_columns=["output"],
+                score_columns=["correct"],
+                data=typed_rows,
             )
             wandb_run.log({"samples/chat": eval_table})
     wandb_run.finish()
