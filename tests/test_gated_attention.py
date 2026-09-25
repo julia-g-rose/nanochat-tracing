@@ -6,7 +6,7 @@ import nanochat.gpt as gpt_module
 from nanochat.gpt import CausalSelfAttention, GPT, GPTConfig
 
 
-def _tiny_config():
+def _tiny_config(attention_gate=True):
     return GPTConfig(
         sequence_len=16,
         vocab_size=64,
@@ -15,6 +15,7 @@ def _tiny_config():
         n_kv_head=4,
         n_embd=32,
         window_pattern="L",
+        attention_gate=attention_gate,
     )
 
 
@@ -62,7 +63,7 @@ def test_gate_runs_through_real_sdpa():
     assert torch.isfinite(attention.sdpa_gate.weight.grad).all()
 
 
-def test_model_initializes_neutral_gates_and_counts_parameters():
+def test_model_initializes_query_dependent_gates_and_counts_parameters():
     config = _tiny_config()
     with torch.device("meta"):
         model = GPT(config)
@@ -70,12 +71,16 @@ def test_model_initializes_neutral_gates_and_counts_parameters():
     model.init_weights()
 
     for block in model.transformer.h:
-        torch.testing.assert_close(
-            block.attn.sdpa_gate.weight,
-            torch.zeros_like(block.attn.sdpa_gate.weight),
-        )
+        assert torch.count_nonzero(block.attn.sdpa_gate.weight) > 0
+        assert torch.isfinite(block.attn.sdpa_gate.weight).all()
         gates = torch.sigmoid(block.attn.sdpa_gate(torch.randn(2, 3, config.n_embd)))
-        torch.testing.assert_close(gates, torch.full_like(gates, 0.5))
+        assert gates.std() > 0
 
     counts = model.num_scaling_params()
     assert counts["total"] == sum(parameter.numel() for parameter in model.parameters())
+
+
+def test_gate_is_opt_in():
+    config = _tiny_config(attention_gate=False)
+    attention = CausalSelfAttention(config, layer_idx=0)
+    assert attention.sdpa_gate is None
