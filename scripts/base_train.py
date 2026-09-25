@@ -70,6 +70,8 @@ def compute_attention_gate_metrics(model, tokens, max_tokens=128):
             handles.append(module.register_forward_hook(
                 lambda _module, _inputs, output, name=name: gate_logits.setdefault(name, output.detach())
             ))
+    if not handles:
+        return {}
     was_training = model.training
     try:
         model.eval()
@@ -117,6 +119,7 @@ parser.add_argument("--aspect-ratio", type=int, default=64, help="model_dim = de
 parser.add_argument("--head-dim", type=int, default=128, help="target head dimension for attention")
 parser.add_argument("--max-seq-len", type=int, default=2048, help="max context length")
 parser.add_argument("--window-pattern", type=str, default="SSSL", help="sliding window pattern tiled across layers: L=full, S=half context (e.g. 'SSL')")
+parser.add_argument("--attention-gate", action="store_true", help="enable query-dependent headwise sigmoid gating after SDPA")
 # Training horizon (only one used, in order of precedence)
 parser.add_argument("--num-iterations", type=int, default=-1, help="explicit number of optimization steps (-1 = disable)")
 parser.add_argument("--target-flops", type=float, default=-1.0, help="calculate num_iterations to reach target_flops (-1 = disable)")
@@ -203,7 +206,7 @@ def build_model_meta(depth):
     config = GPTConfig(
         sequence_len=args.max_seq_len, vocab_size=vocab_size,
         n_layer=depth, n_head=num_heads, n_kv_head=num_heads, n_embd=model_dim,
-        window_pattern=args.window_pattern,
+        window_pattern=args.window_pattern, attention_gate=args.attention_gate,
     )
     with torch.device("meta"):
         model_meta = GPT(config)
@@ -481,10 +484,7 @@ print0(f"Total batch size {total_batch_size:,} => gradient accumulation steps: {
 
 # Enrich the wandb config with resolved/derived values (not just the raw CLI args)
 if not use_dummy_wandb:
-    wandb_run.config.update({
-        "architecture_variant": "query_dependent_headwise_sdpa_gate",
-        "architecture_reference": "arxiv:2505.06708",
-        "architecture_base_commit": "bff31a34fcec80d364b5b93027a393ec77b97949",
+    resolved_config = {
         "resolved_num_iterations": num_iterations,
         "resolved_total_batch_size": total_batch_size,
         "grad_accum_steps": grad_accum_steps,
@@ -493,7 +493,14 @@ if not use_dummy_wandb:
         "ddp_world_size": ddp_world_size,
         "compute_dtype": str(COMPUTE_DTYPE),
         "model_config": model_config_kwargs,
-    }, allow_val_change=True)
+    }
+    if args.attention_gate:
+        resolved_config.update({
+            "architecture_variant": "query_dependent_headwise_sdpa_gate",
+            "architecture_reference": "arxiv:2505.06708",
+            "architecture_base_commit": "bff31a34fcec80d364b5b93027a393ec77b97949",
+        })
+    wandb_run.config.update(resolved_config, allow_val_change=True)
 
 # Go!
 while True:
