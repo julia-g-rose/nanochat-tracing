@@ -59,8 +59,44 @@ def compute_layer_metrics(model):
     if global_sq is not None:
         metrics["grad_norm/global"] = global_sq.sqrt().item()
     return metrics
+
+@torch.no_grad()
+def compute_peri_ln_metrics(model, tokens, max_tokens=128):
+    """Log branch RMS before Peri-LN plus learned output gains."""
+    outputs = {}
+    handles = []
+    for name, module in model.named_modules():
+        if name.endswith(".attn") or name.endswith(".mlp"):
+            handles.append(module.register_forward_hook(
+                lambda _module, _inputs, output, name=name: outputs.setdefault(name, output.detach())
+            ))
+    if not handles or getattr(model.config, "peri_ln", "none") == "none":
+        for handle in handles:
+            handle.remove()
+        return {}
+    was_training = model.training
+    try:
+        model.eval()
+        model(tokens[:1, :max_tokens])
+    finally:
+        for handle in handles:
+            handle.remove()
+        model.train(was_training)
+
+    metrics = {}
+    for name, output in sorted(outputs.items()):
+        layer = int(name.split("transformer.h.", 1)[1].split(".", 1)[0])
+        branch = "attn" if name.endswith(".attn") else "mlp"
+        metrics[f"peri_ln/layer_{layer:02d}_{branch}_pre_rms"] = output.float().square().mean().sqrt().item()
+    for i, block in enumerate(model.transformer.h):
+        for branch in ("attn", "mlp"):
+            gain = getattr(block, f"peri_ln_{branch}_gain")
+            if gain is not None:
+                metrics[f"peri_ln/layer_{i:02d}_{branch}_gain_mean"] = gain.float().mean().item()
+    return metrics
 from nanochat.flash_attention import HAS_FA3
 from scripts.base_eval import evaluate_core
+from nanochat.wandb_utils import make_eval_table
 print_banner()
 
 # -----------------------------------------------------------------------------
@@ -68,6 +104,11 @@ print_banner()
 parser = argparse.ArgumentParser(description="Pretrain base model")
 # Logging
 parser.add_argument("--run", type=str, default="dummy", help="wandb run name ('dummy' disables wandb logging)")
+parser.add_argument("--architecture-family", type=str, default="", help="experiment family metadata for cross-run comparisons")
+parser.add_argument("--architecture-variant", type=str, default="", help="specific architecture variant metadata")
+parser.add_argument("--parent-baseline-run", type=str, default="", help="W&B run ID of the matched baseline")
+parser.add_argument("--matrix-cell", type=str, default="", help="stable experiment-matrix cell identifier")
+parser.add_argument("--trial-type", type=str, default="", help="trial stage such as smoke, short, or matched")
 # Runtime
 parser.add_argument("--device-type", type=str, default="", help="cuda|cpu|mps (empty = autodetect)")
 # FP8 training
@@ -79,6 +120,7 @@ parser.add_argument("--aspect-ratio", type=int, default=64, help="model_dim = de
 parser.add_argument("--head-dim", type=int, default=128, help="target head dimension for attention")
 parser.add_argument("--max-seq-len", type=int, default=2048, help="max context length")
 parser.add_argument("--window-pattern", type=str, default="SSSL", help="sliding window pattern tiled across layers: L=full, S=half context (e.g. 'SSL')")
+parser.add_argument("--peri-ln", type=str, default="none", choices=["none", "fixed", "learned"], help="Peri-LN branch-output normalization mode")
 # Training horizon (only one used, in order of precedence)
 parser.add_argument("--num-iterations", type=int, default=-1, help="explicit number of optimization steps (-1 = disable)")
 parser.add_argument("--target-flops", type=float, default=-1.0, help="calculate num_iterations to reach target_flops (-1 = disable)")
@@ -100,6 +142,7 @@ parser.add_argument("--eval-every", type=int, default=250, help="evaluate val bp
 parser.add_argument("--eval-tokens", type=int, default=80*524288, help="number of tokens to evaluate val loss on")
 parser.add_argument("--core-metric-every", type=int, default=2000, help="evaluate CORE metric every N steps (-1 = disable)")
 parser.add_argument("--core-metric-max-per-task", type=int, default=500, help="examples per task for CORE metric")
+parser.add_argument("--log-eval-tables", action="store_true", help="log typed per-example CORE EvalTables at evaluation checkpoints")
 parser.add_argument("--sample-every", type=int, default=2000, help="sample from model every N steps (-1 = disable)")
 parser.add_argument("--save-every", type=int, default=-1, help="save checkpoints every N steps (-1 = only at end)")
 # Output
@@ -165,7 +208,7 @@ def build_model_meta(depth):
     config = GPTConfig(
         sequence_len=args.max_seq_len, vocab_size=vocab_size,
         n_layer=depth, n_head=num_heads, n_kv_head=num_heads, n_embd=model_dim,
-        window_pattern=args.window_pattern,
+        window_pattern=args.window_pattern, peri_ln=args.peri_ln,
     )
     with torch.device("meta"):
         model_meta = GPT(config)
@@ -443,7 +486,7 @@ print0(f"Total batch size {total_batch_size:,} => gradient accumulation steps: {
 
 # Enrich the wandb config with resolved/derived values (not just the raw CLI args)
 if not use_dummy_wandb:
-    wandb_run.config.update({
+    resolved_config = {
         "resolved_num_iterations": num_iterations,
         "resolved_total_batch_size": total_batch_size,
         "grad_accum_steps": grad_accum_steps,
@@ -452,7 +495,20 @@ if not use_dummy_wandb:
         "ddp_world_size": ddp_world_size,
         "compute_dtype": str(COMPUTE_DTYPE),
         "model_config": model_config_kwargs,
-    }, allow_val_change=True)
+    }
+    if args.peri_ln != "none":
+        resolved_config.update({
+            "architecture_family": args.architecture_family or "normalization",
+            "architecture_variant": args.architecture_variant or "peri_ln_branch_output_norm",
+            "architecture_reference": "arxiv:2502.02732",
+            "architecture_base_commit": "b1f7a761dabf5833c014b242fa1552461a5596e5",
+            "peri_ln_gain": args.peri_ln,
+            "parent_baseline_run": args.parent_baseline_run,
+            "matrix_cell": args.matrix_cell,
+            "trial_type": args.trial_type,
+            "eval_schema_version": "evaltable-v1",
+        })
+    wandb_run.config.update(resolved_config, allow_val_change=True)
 
 # Go!
 while True:
@@ -483,8 +539,9 @@ while True:
     results = {}
     if args.core_metric_every > 0 and (last_step or (step > 0 and step % args.core_metric_every == 0)):
         model.eval()
+        core_sample_rows = [] if args.log_eval_tables else None
         with disable_fp8(orig_model):
-            results = evaluate_core(orig_model, tokenizer, device, max_per_task=args.core_metric_max_per_task)
+            results = evaluate_core(orig_model, tokenizer, device, max_per_task=args.core_metric_max_per_task, collect_rows=core_sample_rows)
         print0(f"Step {step:05d} | CORE metric: {results['core_metric']:.4f}")
         wandb_run.log({
             "step": step,
@@ -492,6 +549,18 @@ while True:
             "core_metric": results["core_metric"],
             "centered_results": results["centered_results"],
         })
+        if master_process and core_sample_rows:
+            # EvalTable rows are ordered inputs -> outputs -> scores. Logging at
+            # the actual training step enables checkpoint-to-checkpoint compare.
+            eval_rows = [[task, input_text, gold, predicted, correct]
+                         for task, input_text, predicted, gold, correct in core_sample_rows]
+            eval_table = make_eval_table(
+                input_columns=["task", "input", "gold"],
+                output_columns=["predicted"],
+                score_columns=["correct"],
+                data=eval_rows,
+            )
+            wandb_run.log({"eval/core_examples": eval_table}, step=step)
         model.train()
 
     # once in a while: sample from the model (only on master process)
@@ -589,7 +658,11 @@ while True:
     # Per-layer training-signal metrics (computed while grads are still live, i.e.
     # after any fp8 unscale and before zero_grad).
     if args.grad_metrics_every > 0 and not use_dummy_wandb and step % args.grad_metrics_every == 0:
-        wandb_run.log({"step": step, **compute_layer_metrics(orig_model)})
+        wandb_run.log({
+            "step": step,
+            **compute_layer_metrics(orig_model),
+            **compute_peri_ln_metrics(orig_model, x),
+        })
     model.zero_grad(set_to_none=True)
     train_loss_f = train_loss.item() # .item() is a CPU-GPU sync point
     synchronize()

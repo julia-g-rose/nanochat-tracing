@@ -37,6 +37,10 @@ class GPTConfig:
     # Characters: L=long (full context), S=short (quarter context)
     # Examples: "L"=all full context, "SL"=alternating, "SSL"=two short then one long
     window_pattern: str = "SSSL"
+    # Peri-LN branch-output normalization (arXiv:2502.02732).
+    # "none" keeps Pre-LN, "fixed" uses parameter-free RMSNorm, and "learned"
+    # adds a per-channel gain initialized to one after each branch RMSNorm.
+    peri_ln: str = "none"
 
 
 def norm(x):
@@ -142,12 +146,29 @@ class MLP(nn.Module):
 class Block(nn.Module):
     def __init__(self, config, layer_idx):
         super().__init__()
+        if config.peri_ln not in ("none", "fixed", "learned"):
+            raise ValueError(f"Unknown peri_ln mode: {config.peri_ln}")
         self.attn = CausalSelfAttention(config, layer_idx)
         self.mlp = MLP(config)
+        self.peri_ln = config.peri_ln
+        if self.peri_ln == "learned":
+            self.peri_ln_attn_gain = nn.Parameter(torch.ones(config.n_embd))
+            self.peri_ln_mlp_gain = nn.Parameter(torch.ones(config.n_embd))
+        else:
+            self.register_parameter("peri_ln_attn_gain", None)
+            self.register_parameter("peri_ln_mlp_gain", None)
+
+    def _normalize_branch(self, branch, gain):
+        if self.peri_ln == "none":
+            return branch
+        branch = norm(branch)
+        return branch if gain is None else branch * gain.to(branch.dtype)
 
     def forward(self, x, ve, cos_sin, window_size, kv_cache):
-        x = x + self.attn(norm(x), ve, cos_sin, window_size, kv_cache)
-        x = x + self.mlp(norm(x))
+        attn_branch = self.attn(norm(x), ve, cos_sin, window_size, kv_cache)
+        x = x + self._normalize_branch(attn_branch, self.peri_ln_attn_gain)
+        mlp_branch = self.mlp(norm(x))
+        x = x + self._normalize_branch(mlp_branch, self.peri_ln_mlp_gain)
         return x
 
 
@@ -228,6 +249,9 @@ class GPT(nn.Module):
             torch.nn.init.zeros_(block.attn.c_proj.weight) # projections are zero
             torch.nn.init.uniform_(block.mlp.c_fc.weight, -s * 0.4, s * 0.4)  # 0.4x init scale for c_fc
             torch.nn.init.zeros_(block.mlp.c_proj.weight)
+            if block.peri_ln == "learned":
+                torch.nn.init.ones_(block.peri_ln_attn_gain)
+                torch.nn.init.ones_(block.peri_ln_mlp_gain)
 
         # Per-layer scalars
         # Per-layer resid init: stronger residual at early layers, weaker at deep layers
@@ -329,7 +353,11 @@ class GPT(nn.Module):
         nparams = sum(p.numel() for p in self.parameters())
         # Exclude non-matmul params: embeddings and per-layer scalars
         value_embeds_numel = sum(ve.weight.numel() for ve in self.value_embeds.values())
-        nparams_exclude = (self.transformer.wte.weight.numel() + value_embeds_numel +
+        peri_ln_numel = sum(
+            p.numel() for name, p in self.transformer.h.named_parameters()
+            if "peri_ln_" in name
+        )
+        nparams_exclude = (self.transformer.wte.weight.numel() + value_embeds_numel + peri_ln_numel +
                           self.resid_lambdas.numel() + self.x0_lambdas.numel() +
                           self.smear_gate.weight.numel() + self.smear_lambda.numel() + self.backout_lambda.numel())
         h, q, t = self.config.n_head, self.config.n_embd // self.config.n_head, self.config.sequence_len
@@ -358,15 +386,17 @@ class GPT(nn.Module):
         wte = sum(p.numel() for p in self.transformer.wte.parameters())
         value_embeds = sum(p.numel() for p in self.value_embeds.parameters())
         lm_head = sum(p.numel() for p in self.lm_head.parameters())
-        transformer_matrices = sum(p.numel() for p in self.transformer.h.parameters())
+        peri_ln = sum(p.numel() for name, p in self.transformer.h.named_parameters() if "peri_ln_" in name)
+        transformer_matrices = sum(p.numel() for name, p in self.transformer.h.named_parameters() if "peri_ln_" not in name)
         scalars = self.resid_lambdas.numel() + self.x0_lambdas.numel() + self.smear_gate.weight.numel() + self.smear_lambda.numel() + self.backout_lambda.numel()
-        total = wte + value_embeds + lm_head + transformer_matrices + scalars
+        total = wte + value_embeds + lm_head + transformer_matrices + peri_ln + scalars
         assert total == sum(p.numel() for p in self.parameters()), "Parameter count mismatch"
         return {
             'wte': wte,
             'value_embeds': value_embeds,
             'lm_head': lm_head,
             'transformer_matrices': transformer_matrices,
+            'peri_ln': peri_ln,
             'scalars': scalars,
             'total': total,
         }
@@ -376,14 +406,15 @@ class GPT(nn.Module):
         ddp, rank, local_rank, world_size = get_dist_info()
 
         # Separate out all parameters into groups
-        matrix_params = list(self.transformer.h.parameters())
+        matrix_params = [p for name, p in self.transformer.h.named_parameters() if "peri_ln_" not in name]
+        peri_ln_params = [p for name, p in self.transformer.h.named_parameters() if "peri_ln_" in name]
         value_embeds_params = list(self.value_embeds.parameters())
         embedding_params = list(self.transformer.wte.parameters())
         lm_head_params = list(self.lm_head.parameters())
         resid_params = [self.resid_lambdas]
         x0_params = [self.x0_lambdas]
         smear_params = [self.smear_gate.weight, self.smear_lambda, self.backout_lambda]
-        assert len(list(self.parameters())) == len(matrix_params) + len(embedding_params) + len(lm_head_params) + len(value_embeds_params) + len(resid_params) + len(x0_params) + len(smear_params)
+        assert len(list(self.parameters())) == len(matrix_params) + len(peri_ln_params) + len(embedding_params) + len(lm_head_params) + len(value_embeds_params) + len(resid_params) + len(x0_params) + len(smear_params)
 
         # Scale the LR for the AdamW parameters by ∝1/√dmodel (tuned for 768 dim model)
         dmodel_lr_scale = (model_dim / 768) ** -0.5
@@ -399,6 +430,8 @@ class GPT(nn.Module):
             dict(kind='adamw', params=x0_params, lr=scalar_lr, betas=(0.96, 0.95), eps=1e-10, weight_decay=0.0),  # higher beta1 for x0
             dict(kind='adamw', params=smear_params, lr=0.2, betas=(0.8, 0.95), eps=1e-10, weight_decay=0.0),
         ]
+        if peri_ln_params:
+            param_groups.append(dict(kind='adamw', params=peri_ln_params, lr=scalar_lr * 0.01, betas=(0.8, 0.95), eps=1e-10, weight_decay=0.0))
         # Muon groups (matrix params, grouped by shape for stacking)
         for shape in sorted({p.shape for p in matrix_params}):
             group_params = [p for p in matrix_params if p.shape == shape]

@@ -33,6 +33,7 @@ import torch
 import wandb
 
 from nanochat.common import compute_init, compute_cleanup, print0, get_base_dir, autodetect_device_type, download_file_with_lock, DummyWandb
+from nanochat.wandb_utils import make_eval_table
 from nanochat.tokenizer import HuggingFaceTokenizer, get_token_bytes
 from nanochat.checkpoint_manager import load_model
 from nanochat.core_eval import evaluate_task
@@ -316,16 +317,25 @@ def main():
         log_data[f"eval/bpb_{split_name}"] = bpb
     if log_data:
         wandb_run.log(log_data)
-    # Table of the conditioned samples (input prompt -> model output)
+    # Typed EvalTables power side-by-side run comparisons and score deltas.
     if samples and not use_dummy_wandb:
-        sample_table = wandb.Table(columns=["prompt", "output"])
-        for prompt, output in zip(prompts, samples):
-            sample_table.add_data(prompt, output)
+        sample_table = make_eval_table(
+            input_columns=["prompt"],
+            output_columns=["output"],
+            score_columns=[],
+            data=[[prompt, output] for prompt, output in zip(prompts, samples)],
+        )
         wandb_run.log({"samples/conditioned": sample_table})
-    # Table of CORE per-example predictions (MC/schema; sampled + gathered across ranks).
-    # Filter/group by the "task" column in wandb to inspect any single dataset.
+    # CORE rows are ordered inputs -> outputs -> scores for EvalTable typing.
     if core_sample_rows and not use_dummy_wandb:
-        core_table = wandb.Table(columns=["task", "input", "predicted", "gold", "correct"], data=core_sample_rows)
+        rows = [[task, input_text, gold, predicted, correct]
+                for task, input_text, predicted, gold, correct in core_sample_rows]
+        core_table = make_eval_table(
+            input_columns=["task", "input", "gold"],
+            output_columns=["predicted"],
+            score_columns=["correct"],
+            data=rows,
+        )
         wandb_run.log({"samples/core": core_table})
     wandb_run.finish()
 
