@@ -235,10 +235,6 @@ class GPT(nn.Module):
             torch.nn.init.uniform_(block.attn.c_q.weight, -s, s) # weights use Uniform to avoid outliers
             torch.nn.init.uniform_(block.attn.c_k.weight, -s, s)
             torch.nn.init.uniform_(block.attn.c_v.weight, -s, s)
-            if block.attn.sdpa_gate is not None:
-                # The official implementation initializes gate channels like
-                # the query projection, rather than forcing a constant 0.5 gate.
-                torch.nn.init.uniform_(block.attn.sdpa_gate.weight, -s, s)
             torch.nn.init.zeros_(block.attn.c_proj.weight) # projections are zero
             torch.nn.init.uniform_(block.mlp.c_fc.weight, -s * 0.4, s * 0.4)  # 0.4x init scale for c_fc
             torch.nn.init.zeros_(block.mlp.c_proj.weight)
@@ -265,6 +261,18 @@ class GPT(nn.Module):
         for block in self.transformer.h:
             if block.attn.ve_gate is not None:
                 torch.nn.init.uniform_(block.attn.ve_gate.weight, 0.0, 0.02)
+
+        # Initialize treatment-only weights AFTER every shared random draw.
+        # Preserve the RNG state too: enabling the gate must not change shared
+        # initial weights or the random stream used after initialization.
+        # Keep the ordinary query-projection initialization distribution.
+        gate_weights = [block.attn.sdpa_gate.weight for block in self.transformer.h
+                        if block.attn.sdpa_gate is not None]
+        if gate_weights:
+            cuda_devices = sorted({w.device.index for w in gate_weights if w.is_cuda})
+            with torch.random.fork_rng(devices=cuda_devices):
+                for weight in gate_weights:
+                    torch.nn.init.uniform_(weight, -s, s)
 
         # Rotary embeddings
         head_dim = self.config.n_embd // self.config.n_head

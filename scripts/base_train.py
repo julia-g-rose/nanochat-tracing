@@ -108,6 +108,8 @@ print_banner()
 parser = argparse.ArgumentParser(description="Pretrain base model")
 # Logging
 parser.add_argument("--run", type=str, default="dummy", help="wandb run name ('dummy' disables wandb logging)")
+parser.add_argument("--experiment-group", type=str, default=None, help="optional shared W&B group for a paired experiment")
+parser.add_argument("--pair-id", type=str, default=None, help="matched-pair identifier (metadata only)")
 # Runtime
 parser.add_argument("--device-type", type=str, default="", help="cuda|cpu|mps (empty = autodetect)")
 parser.add_argument("--seed", type=int, default=42, help="global random seed for model initialization and training")
@@ -149,6 +151,13 @@ parser.add_argument("--model-tag", type=str, default=None, help="override model 
 parser.add_argument("--grad-metrics-every", type=int, default=100, help="log per-layer grad/param L2 norms every N steps (-1 = disable)")
 args = parser.parse_args()
 user_config = vars(args).copy()  # for logging
+if os.environ.get("NANOCHAT_SOURCE_COMMIT"):
+    user_config["source_commit"] = os.environ["NANOCHAT_SOURCE_COMMIT"]
+agent = {key: os.environ[var] for key, var in
+         (("thread_id", "WANDB_ARIA_THREAD_ID"), ("turn_id", "WANDB_ARIA_TURN_ID"))
+         if os.environ.get(var)}
+if agent:
+    user_config["_wb_agent"] = agent
 # -----------------------------------------------------------------------------
 # Compute init and wandb logging
 
@@ -167,7 +176,7 @@ print0(f"COMPUTE_DTYPE: {COMPUTE_DTYPE} ({COMPUTE_DTYPE_REASON})")
 
 # wandb logging init
 use_dummy_wandb = args.run == "dummy" or not master_process
-wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project=os.environ.get("WANDB_PROJECT", "nanochat"), name=f"{args.run}-base", config=user_config, group=args.run, job_type="pretrain")
+wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project=os.environ.get("WANDB_PROJECT", "nanochat"), name=f"{args.run}-base", config=user_config, group=args.experiment_group or args.run, job_type="pretrain")
 wandb_run.log_code(root=".") # capture full source tree in wandb
 
 # Flash Attention status
