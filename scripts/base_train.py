@@ -59,6 +59,46 @@ def compute_layer_metrics(model):
     if global_sq is not None:
         metrics["grad_norm/global"] = global_sq.sqrt().item()
     return metrics
+
+@torch.no_grad()
+def compute_attention_gate_metrics(model, tokens, max_tokens=128):
+    """Summarize learned SDPA gates on a small, fixed-cost token slice."""
+    gate_logits = {}
+    handles = []
+    for name, module in model.named_modules():
+        if name.endswith(".attn.sdpa_gate"):
+            handles.append(module.register_forward_hook(
+                lambda _module, _inputs, output, name=name: gate_logits.setdefault(name, output.detach())
+            ))
+    if not handles:
+        return {}
+    was_training = model.training
+    try:
+        model.eval()
+        model(tokens[:1, :max_tokens])
+    finally:
+        for handle in handles:
+            handle.remove()
+        model.train(was_training)
+
+    metrics = {}
+    all_gates = []
+    for name, logits in sorted(gate_logits.items()):
+        layer = int(name.split("transformer.h.", 1)[1].split(".", 1)[0])
+        gates = torch.sigmoid(logits.float()).flatten()
+        metrics[f"attention_gate/layer_{layer:02d}_mean"] = gates.mean().item()
+        all_gates.append(gates)
+    if all_gates:
+        gates = torch.cat(all_gates)
+        quantiles = torch.quantile(gates, torch.tensor([0.1, 0.5, 0.9], device=gates.device))
+        metrics.update({
+            "attention_gate/mean": gates.mean().item(),
+            "attention_gate/std": gates.std().item(),
+            "attention_gate/p10": quantiles[0].item(),
+            "attention_gate/p50": quantiles[1].item(),
+            "attention_gate/p90": quantiles[2].item(),
+        })
+    return metrics
 from nanochat.flash_attention import HAS_FA3
 from scripts.base_eval import evaluate_core
 print_banner()
@@ -68,8 +108,11 @@ print_banner()
 parser = argparse.ArgumentParser(description="Pretrain base model")
 # Logging
 parser.add_argument("--run", type=str, default="dummy", help="wandb run name ('dummy' disables wandb logging)")
+parser.add_argument("--experiment-group", type=str, default=None, help="optional shared W&B group for a paired experiment")
+parser.add_argument("--pair-id", type=str, default=None, help="matched-pair identifier (metadata only)")
 # Runtime
 parser.add_argument("--device-type", type=str, default="", help="cuda|cpu|mps (empty = autodetect)")
+parser.add_argument("--seed", type=int, default=42, help="global random seed for model initialization and training")
 # FP8 training
 parser.add_argument("--fp8", action="store_true", help="enable FP8 training (requires H100+ GPU and torchao)")
 parser.add_argument("--fp8-recipe", type=str, default="tensorwise", choices=["rowwise", "tensorwise"], help="FP8 scaling recipe: tensorwise (faster, recommended) or rowwise (more accurate but slower)")
@@ -79,6 +122,7 @@ parser.add_argument("--aspect-ratio", type=int, default=64, help="model_dim = de
 parser.add_argument("--head-dim", type=int, default=128, help="target head dimension for attention")
 parser.add_argument("--max-seq-len", type=int, default=2048, help="max context length")
 parser.add_argument("--window-pattern", type=str, default="SSSL", help="sliding window pattern tiled across layers: L=full, S=half context (e.g. 'SSL')")
+parser.add_argument("--attention-gate", action="store_true", help="enable query-dependent headwise sigmoid gating after SDPA")
 # Training horizon (only one used, in order of precedence)
 parser.add_argument("--num-iterations", type=int, default=-1, help="explicit number of optimization steps (-1 = disable)")
 parser.add_argument("--target-flops", type=float, default=-1.0, help="calculate num_iterations to reach target_flops (-1 = disable)")
@@ -107,11 +151,18 @@ parser.add_argument("--model-tag", type=str, default=None, help="override model 
 parser.add_argument("--grad-metrics-every", type=int, default=100, help="log per-layer grad/param L2 norms every N steps (-1 = disable)")
 args = parser.parse_args()
 user_config = vars(args).copy()  # for logging
+if os.environ.get("NANOCHAT_SOURCE_COMMIT"):
+    user_config["source_commit"] = os.environ["NANOCHAT_SOURCE_COMMIT"]
+agent = {key: os.environ[var] for key, var in
+         (("thread_id", "WANDB_ARIA_THREAD_ID"), ("turn_id", "WANDB_ARIA_TURN_ID"))
+         if os.environ.get(var)}
+if agent:
+    user_config["_wb_agent"] = agent
 # -----------------------------------------------------------------------------
 # Compute init and wandb logging
 
 device_type = autodetect_device_type() if args.device_type == "" else args.device_type
-ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
+ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type, seed=args.seed)
 master_process = ddp_rank == 0 # this process will do logging, checkpointing etc.
 synchronize = torch.cuda.synchronize if device_type == "cuda" else lambda: None
 get_max_memory = torch.cuda.max_memory_allocated if device_type == "cuda" else lambda: 0
@@ -125,7 +176,7 @@ print0(f"COMPUTE_DTYPE: {COMPUTE_DTYPE} ({COMPUTE_DTYPE_REASON})")
 
 # wandb logging init
 use_dummy_wandb = args.run == "dummy" or not master_process
-wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project=os.environ.get("WANDB_PROJECT", "nanochat"), name=f"{args.run}-base", config=user_config, group=args.run, job_type="pretrain")
+wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project=os.environ.get("WANDB_PROJECT", "nanochat"), name=f"{args.run}-base", config=user_config, group=args.experiment_group or args.run, job_type="pretrain")
 wandb_run.log_code(root=".") # capture full source tree in wandb
 
 # Flash Attention status
@@ -165,7 +216,7 @@ def build_model_meta(depth):
     config = GPTConfig(
         sequence_len=args.max_seq_len, vocab_size=vocab_size,
         n_layer=depth, n_head=num_heads, n_kv_head=num_heads, n_embd=model_dim,
-        window_pattern=args.window_pattern,
+        window_pattern=args.window_pattern, attention_gate=args.attention_gate,
     )
     with torch.device("meta"):
         model_meta = GPT(config)
@@ -443,7 +494,7 @@ print0(f"Total batch size {total_batch_size:,} => gradient accumulation steps: {
 
 # Enrich the wandb config with resolved/derived values (not just the raw CLI args)
 if not use_dummy_wandb:
-    wandb_run.config.update({
+    resolved_config = {
         "resolved_num_iterations": num_iterations,
         "resolved_total_batch_size": total_batch_size,
         "grad_accum_steps": grad_accum_steps,
@@ -452,7 +503,14 @@ if not use_dummy_wandb:
         "ddp_world_size": ddp_world_size,
         "compute_dtype": str(COMPUTE_DTYPE),
         "model_config": model_config_kwargs,
-    }, allow_val_change=True)
+    }
+    if args.attention_gate:
+        resolved_config.update({
+            "architecture_variant": "query_dependent_headwise_sdpa_gate",
+            "architecture_reference": "arxiv:2505.06708",
+            "architecture_base_commit": "bff31a34fcec80d364b5b93027a393ec77b97949",
+        })
+    wandb_run.config.update(resolved_config, allow_val_change=True)
 
 # Go!
 while True:
@@ -589,7 +647,11 @@ while True:
     # Per-layer training-signal metrics (computed while grads are still live, i.e.
     # after any fp8 unscale and before zero_grad).
     if args.grad_metrics_every > 0 and not use_dummy_wandb and step % args.grad_metrics_every == 0:
-        wandb_run.log({"step": step, **compute_layer_metrics(orig_model)})
+        wandb_run.log({
+            "step": step,
+            **compute_layer_metrics(orig_model),
+            **compute_attention_gate_metrics(orig_model, x),
+        })
     model.zero_grad(set_to_none=True)
     train_loss_f = train_loss.item() # .item() is a CPU-GPU sync point
     synchronize()

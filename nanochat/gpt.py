@@ -37,6 +37,8 @@ class GPTConfig:
     # Characters: L=long (full context), S=short (quarter context)
     # Examples: "L"=all full context, "SL"=alternating, "SSL"=two short then one long
     window_pattern: str = "SSSL"
+    # Query-dependent, head-specific sigmoid gate after SDPA (arXiv:2505.06708).
+    attention_gate: bool = False
 
 
 def norm(x):
@@ -76,6 +78,9 @@ class CausalSelfAttention(nn.Module):
         self.c_k = Linear(self.n_embd, self.n_kv_head * self.head_dim, bias=False)
         self.c_v = Linear(self.n_embd, self.n_kv_head * self.head_dim, bias=False)
         self.c_proj = Linear(self.n_embd, self.n_embd, bias=False)
+        # Keep the gate separate from c_q so the main query projection retains
+        # tensor-core-friendly dimensions under FP8.
+        self.sdpa_gate = Linear(self.n_embd, self.n_head, bias=False) if config.attention_gate else None
         self.ve_gate_channels = 12
         self.ve_gate = Linear(self.ve_gate_channels, self.n_kv_head, bias=False) if has_ve(layer_idx, config.n_layer) else None
 
@@ -119,6 +124,11 @@ class CausalSelfAttention(nn.Module):
             # Advance position after last layer processes
             if self.layer_idx == kv_cache.n_layers - 1:
                 kv_cache.advance(T)
+
+        # Add a cheap non-linearity between SDPA and the output projection.
+        if self.sdpa_gate is not None:
+            gate = torch.sigmoid(self.sdpa_gate(x)).unsqueeze(-1)  # (B, T, n_head, 1)
+            y = y * gate
 
         # Re-assemble the heads and project back to residual stream
         y = y.contiguous().view(B, T, -1)
@@ -251,6 +261,18 @@ class GPT(nn.Module):
         for block in self.transformer.h:
             if block.attn.ve_gate is not None:
                 torch.nn.init.uniform_(block.attn.ve_gate.weight, 0.0, 0.02)
+
+        # Initialize treatment-only weights AFTER every shared random draw.
+        # Preserve the RNG state too: enabling the gate must not change shared
+        # initial weights or the random stream used after initialization.
+        # Keep the ordinary query-projection initialization distribution.
+        gate_weights = [block.attn.sdpa_gate.weight for block in self.transformer.h
+                        if block.attn.sdpa_gate is not None]
+        if gate_weights:
+            cuda_devices = sorted({w.device.index for w in gate_weights if w.is_cuda})
+            with torch.random.fork_rng(devices=cuda_devices):
+                for weight in gate_weights:
+                    torch.nn.init.uniform_(weight, -s, s)
 
         # Rotary embeddings
         head_dim = self.config.n_embd // self.config.n_head
